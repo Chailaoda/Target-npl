@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "id": "sample-legacy",
+  "name": "示例主题兼容规则",
+  "topic_patterns": [
+    "示例活动"
+  ],
+  "accepted_labels": [
+    "positive_interest",
+    "planning",
+    "seeking_company"
+  ],
+  "rules": [
+    {
+      "label": "negative",
+      "name": "否定",
+      "score": 0,
+      "patterns": [
+        "不喜欢|没兴趣"
+      ]
+    },
+    {
+      "label": "promotion",
+      "name": "推广",
+      "score": 0,
+      "patterns": [
+        "低价出票|票务代理"
+      ]
+    },
+    {
+      "label": "seeking_company",
+      "name": "明确邀请",
+      "score": 90,
+      "patterns": [
+        "找搭子|求同行|有结伴的吗"
+      ]
+    },
+    {
+      "label": "planning",
+      "name": "明确计划",
+      "score": 80,
+      "patterns": [
+        "打算去|准备去"
+      ]
+    },
+    {
+      "label": "positive_interest",
+      "name": "明确兴趣",
+      "score": 60,
+      "patterns": [
+        "我喜欢|我也喜欢"
+      ]
+    }
+  ]
+}

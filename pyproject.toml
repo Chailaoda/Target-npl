@@ -1,0 +1,9 @@
+[project]
+name = "target-npl"
+version = "0.1.0"
+description = "Local, evidence-linked filtering of public sample topic content"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false

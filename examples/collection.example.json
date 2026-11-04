@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "platform": "douyin",
+  "keywords": [
+    "示例活动"
+  ],
+  "pages_per_keyword": 1,
+  "posts_per_keyword": 5,
+  "max_posts": 5,
+  "comments_per_post": 2,
+  "request_interval_seconds": 5,
+  "max_requests": 10,
+  "timeout_seconds": 120,
+  "proxy_mode": "direct"
+}

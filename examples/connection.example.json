@@ -1,0 +1,13 @@
+{
+  "source": {
+    "platform": "douyin",
+    "proxy_mode": "direct"
+  },
+  "ark": {
+    "credential_kind": "coding_plan",
+    "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+    "model": "deepseek-v4.1-flash",
+    "proxy_mode": "system",
+    "credential_target": "Target-npl/VolcengineArk"
+  }
+}

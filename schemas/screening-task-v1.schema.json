@@ -1,0 +1,475 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:target-npl:screening-task:1",
+  "title": "统一筛选任务包 v1",
+  "type": "object",
+  "properties": {
+    "task": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "scope": {
+          "type": "object",
+          "properties": {
+            "locations": {
+              "type": "array",
+              "maxItems": 20,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              }
+            },
+            "recent_days": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3650
+                }
+              ]
+            },
+            "published_after": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "format": "date"
+                }
+              ]
+            },
+            "published_before": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "format": "date"
+                }
+              ]
+            }
+          },
+          "required": [
+            "locations",
+            "recent_days",
+            "published_after",
+            "published_before"
+          ],
+          "additionalProperties": false
+        },
+        "exclusions": {
+          "type": "object",
+          "properties": {
+            "promotions": {
+              "type": "boolean"
+            },
+            "terms": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "promotions",
+            "terms"
+          ],
+          "additionalProperties": false
+        },
+        "execution": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "enum": [
+                "existing",
+                "collect"
+              ]
+            },
+            "dataset_id": {
+              "type": "string",
+              "pattern": "^(latest|\\d{8}T\\d{12}Z)$"
+            },
+            "mode": {
+              "enum": [
+                "rules",
+                "ark"
+              ]
+            },
+            "max_api_calls": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            }
+          },
+          "required": [
+            "source",
+            "dataset_id",
+            "mode",
+            "max_api_calls"
+          ],
+          "additionalProperties": false
+        },
+        "assumptions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "maxItems": 100
+        },
+        "unresolved": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "maxItems": 100
+        },
+        "human_overrides": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "string",
+            "maxLength": 200,
+            "pattern": "^/(policy/|collection/|task/(scope|execution|exclusions)/)"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "description",
+        "scope",
+        "exclusions",
+        "execution",
+        "assumptions",
+        "unresolved",
+        "human_overrides"
+      ],
+      "additionalProperties": false
+    },
+    "policy": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]{1,64}$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "topic_patterns": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "maxItems": 100,
+          "minItems": 1
+        },
+        "ambiguous_reply_patterns": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "maxItems": 100
+        },
+        "dimensions": {
+          "type": "object",
+          "properties": {
+            "topic": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "relevant",
+                  "unrelated",
+                  "uncertain"
+                ]
+              },
+              "uniqueItems": true,
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "stance": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "positive",
+                  "negative",
+                  "neutral",
+                  "unclear"
+                ]
+              },
+              "uniqueItems": true,
+              "minItems": 4,
+              "maxItems": 4
+            },
+            "intent": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "seeking_company",
+                  "planning",
+                  "attended",
+                  "none",
+                  "unclear"
+                ]
+              },
+              "uniqueItems": true,
+              "minItems": 5,
+              "maxItems": 5
+            },
+            "promotion": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "yes",
+                  "no",
+                  "uncertain"
+                ]
+              },
+              "uniqueItems": true,
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "author_role": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "individual",
+                  "organizer",
+                  "unknown"
+                ]
+              },
+              "uniqueItems": true,
+              "minItems": 3,
+              "maxItems": 3
+            }
+          },
+          "required": [
+            "topic",
+            "stance",
+            "intent",
+            "promotion",
+            "author_role"
+          ],
+          "additionalProperties": false
+        },
+        "rules": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "maxItems": 100
+          }
+        },
+        "decision_gates": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            },
+            "maxItems": 100
+          }
+        },
+        "acceptance": {
+          "type": "object",
+          "properties": {
+            "stances": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "maxItems": 100
+            },
+            "intents": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "stances",
+            "intents"
+          ],
+          "additionalProperties": false
+        },
+        "display": {
+          "type": "object",
+          "properties": {
+            "sort_weights": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100
+              }
+            },
+            "include_related": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "sort_weights",
+            "include_related"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "id",
+        "name",
+        "topic_patterns",
+        "ambiguous_reply_patterns",
+        "dimensions",
+        "rules",
+        "acceptance",
+        "display"
+      ],
+      "additionalProperties": false
+    },
+    "collection": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "platform": {
+          "enum": [
+            "douyin",
+            "xhs",
+            "kuaishou",
+            "bilibili",
+            "weibo",
+            "tieba",
+            "zhihu"
+          ]
+        },
+        "proxy_mode": {
+          "const": "direct"
+        },
+        "keywords": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          }
+        },
+        "pages_per_keyword": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "posts_per_keyword": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "max_posts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "comments_per_post": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "request_interval_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "max_requests": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 20,
+          "maximum": 1800
+        },
+        "platforms": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "douyin",
+              "xhs",
+              "kuaishou",
+              "bilibili",
+              "weibo",
+              "tieba",
+              "zhihu"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 7,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "schema_version",
+        "platform",
+        "proxy_mode",
+        "keywords",
+        "pages_per_keyword",
+        "posts_per_keyword",
+        "max_posts",
+        "comments_per_post",
+        "request_interval_seconds",
+        "max_requests",
+        "timeout_seconds"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "task",
+    "policy",
+    "collection"
+  ],
+  "additionalProperties": false
+}
