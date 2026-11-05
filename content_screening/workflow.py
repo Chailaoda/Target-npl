@@ -44,6 +44,10 @@ def connect(path):
     columns={r[1] for r in db.execute('PRAGMA table_info(v2_jobs)')}
     for column in ('task_json','config_revision'):
         if column not in columns:db.execute(f'ALTER TABLE v2_jobs ADD COLUMN {column} TEXT')
+    # WP3: idempotent forward migration for account/interest tables. Pure
+    # CREATE IF NOT EXISTS — old code versions ignore the new tables.
+    from .account_repository import migrate as _migrate_accounts
+    _migrate_accounts(db)
     return db
 
 
@@ -153,6 +157,12 @@ def run(input_path, policy_path, db_path, output, mode="rules", connection_path=
                 db.execute("INSERT OR IGNORE INTO v2_tasks VALUES (?,?,?,'pending',NULL)", (job_id, source_hash, tasks[source_hash][0]))
             for obs in observations:
                 db.execute("INSERT OR IGNORE INTO v2_observations VALUES (?,?,?,?,?,?)", (input_hash, obs["line"], fingerprint(obs["record"]), obs["keyword"], obs["raw_hash"], str(Path(input_path).resolve())))
+            # WP3: ingest public-account profiles and content links. Display
+            # profile data lives in account tables only; it never participates
+            # in source_hash/analysis_key, so profile updates cannot invalidate
+            # cached analyses. Anonymous/unknown rows are skipped untouched.
+            from .account_repository import ingest_observations as _ingest_accounts
+            _ingest_accounts(db, observations, utcnow(), fingerprint)
         if on_start is not None:on_start(job_id)
         calls, reused, errors, tokens, consecutive_errors = 0, 0, 0, 0, 0
         try:
@@ -273,7 +283,9 @@ def export_job(db, job_id, output, policy=None):
             if result and item['status']!='needs_review' and result.get('scope_check',{}).get('status') in ('excluded','unknown'):state='excluded' if result['scope_check']['status']=='excluded' else 'scope_unknown'
             dims = ' · '.join(f'{names[k]}：{values.get(result[k],esc(result[k]))}' for k in names) if result else "处理失败，不能算未命中"
             evidence = ''.join(f'<li>{names[d]}（{"上下文主题" if e.get("source_hash") else "本人原文"}）：{esc(e["quote"])} [{e["start"]}:{e["end"]}]' + (f' <a href="#source-{esc(e["source_hash"])}">查看上下文来源</a>' if e.get("source_hash") else '') + '</li>' for d, e in (result or {}).get("evidence", {}).items())
-            url = public_url(source["url"])
+            # A07 fix: validate the source URL against the record's own platform,
+            # not the Douyin default — cross-platform links must not be dropped.
+            url = public_url(source["url"], source["platform"])
             link = f'<a href="{esc(url)}" rel="noreferrer noopener" target="_blank">打开来源作品</a>' if url else "无可用来源链接"
             review = item["review"]
             cards.append(f'<article id="source-{fingerprint(source)}" data-state="{state}"><p><b>{states[state]}</b> · {"评论" if source["object_type"] == "comment" else "作品"} · 平台 {esc(source["platform"])} · {esc(source["content_id"])}</p><p class="body">{esc(source["text"])}</p><p>{dims}</p><ul>{evidence}</ul><p>{esc((result or {}).get("reason", item["error_code"] or "待处理"))}</p><p>发布时间：{esc(source["published_at"] or source["published_time_text"] or "未知")} · 历史表达不代表当前邀约有效</p><p>上下文缺失：{esc((result or {}).get("context_missing", "未知"))} · {link}</p><p>复核：{esc(review["decision"] or "未复核")} {esc(review["note"] or "")}</p><details><summary>分析标识（命令行复核使用）</summary><code>{esc(item["analysis_key"])}</code></details></article>')
