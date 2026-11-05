@@ -94,7 +94,9 @@ def live(service,run_id):
     person_exact = set()
     person_potential = set()
     for c in candidates:
-        pkey = c.get('author_key') or f"{c.get('platform')}:{c.get('author') or c.get('id')}"
+        # Never group people by nickname: without a stable author key the
+        # analysis key itself keeps records distinct within a platform.
+        pkey = c.get('author_key') or f"{c.get('platform')}:content:{c.get('id')}"
         if c.get('evidence_level') == 'explicit':
             person_exact.add(pkey)
         elif c.get('evidence_level') == 'related_only' or 'tier_potential' in c.get('quality_flags', []):

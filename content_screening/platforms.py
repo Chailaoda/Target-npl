@@ -7,10 +7,10 @@ PLATFORMS={
     'douyin':{'name':'抖音','upstream':'dy','home':'https://www.douyin.com/jingxuan','module':'douyin','crawler':'DouYinCrawler','factory':'create_douyin_client','hosts':['www.douyin.com']},
     'xhs':{'name':'小红书','upstream':'xhs','home':'https://www.xiaohongshu.com','module':'xhs','crawler':'XiaoHongShuCrawler','factory':'create_xhs_client','hosts':['www.xiaohongshu.com','edith.xiaohongshu.com']},
     'kuaishou':{'name':'快手','upstream':'ks','home':'https://www.kuaishou.com','module':'kuaishou','crawler':'KuaishouCrawler','factory':'create_ks_client','hosts':['www.kuaishou.com']},
-    'bilibili':{'name':'B站','upstream':'bili','home':'https://www.bilibili.com','module':'bilibili','crawler':'BilibiliCrawler','factory':'create_bilibili_client','hosts':['www.bilibili.com','api.bilibili.com']},
-    'weibo':{'name':'微博','upstream':'wb','home':'https://m.weibo.cn','module':'weibo','crawler':'WeiboCrawler','factory':'create_weibo_client','hosts':['m.weibo.cn','weibo.com','www.weibo.com']},
+    'bilibili':{'name':'B站','upstream':'bili','home':'https://www.bilibili.com','module':'bilibili','crawler':'BilibiliCrawler','factory':'create_bilibili_client','hosts':['www.bilibili.com','api.bilibili.com','space.bilibili.com']},
+    'weibo':{'name':'微博','upstream':'wb','home':'https://m.weibo.cn','module':'weibo','crawler':'WeiboCrawler','factory':'create_weibo_client','hosts':['m.weibo.cn','weibo.com','www.weibo.com','weibo.cn','m.weibo.cn']},
     'tieba':{'name':'百度贴吧','upstream':'tieba','home':'https://tieba.baidu.com','module':'tieba','crawler':'TieBaCrawler','factory':'create_tieba_client','hosts':['tieba.baidu.com']},
-    'zhihu':{'name':'知乎','upstream':'zhihu','home':'https://www.zhihu.com','module':'zhihu','crawler':'ZhihuCrawler','factory':'create_zhihu_client','hosts':['www.zhihu.com']},
+    'zhihu':{'name':'知乎','upstream':'zhihu','home':'https://www.zhihu.com','module':'zhihu','crawler':'ZhihuCrawler','factory':'create_zhihu_client','hosts':['www.zhihu.com','zhihu.com']},
 }
 
 
