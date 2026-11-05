@@ -72,7 +72,7 @@
 ## 6. 回滚方案
 
 1. **代码回滚**：`git checkout main`；功能分支保留不删，数据库 schema 变更可回滚（见下）。
-2. **数据库回滚**：WP3 迁移为纯增量 `CREATE TABLE IF NOT EXISTS`（六张新逻辑表，**不改动 v2_* 既有表结构**——缓存分离通过"语义记录与展示资料分离"在标准化层实现，无需增列），提供 `scripts/db_migrate.py --rollback`：仅删除新增六表，v2_* 数据零改动，旧代码可立即在迁移后的库上运行。
+2. **数据库回滚**：WP3 迁移为纯增量 `CREATE TABLE IF NOT EXISTS`（新增账号/画像/归属冲突表，**不改动 v2_* 既有表结构**——缓存分离通过"语义记录与展示资料分离"在标准化层实现，无需增列）；后续对**新增表** `account_content_links` 的 `attribution_authority` 列升级用同一事务内 `ALTER TABLE` 原地补齐，同样不触碰 v2_*。提供 `scripts/db_migrate.py --rollback`：仅删除新增表，v2_* 数据零改动，旧代码可立即在迁移后的库上运行。
 3. **vendor 回滚**：受控版本在独立分支/worktree，运行时 `HEAD` 与 integrity check 不动；回滚即弃用新分支，无需任何操作。
 4. **数据回滚**：真实数据全部在 `data/backups/20261105-wp0/` 有冷备份；改造过程不修改任何历史记录行（新表只增、旧表 INSERT-only）。
 

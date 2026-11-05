@@ -25,7 +25,9 @@ if str(ROOT) not in sys.path:
 from content_screening.normalization import normalize, normalize_profile, public_url, read_export
 from content_screening.pipeline import fingerprint
 from content_screening.workflow import run, connect
-from content_screening.account_repository import account_key, search_accounts, account_overview
+from content_screening.account_repository import (account_key, search_accounts, account_overview,
+                                                  attribution_conflicts, resolve_attribution_conflict,
+                                                  analyzed_content_links)
 
 POLICY = ROOT / "profiles/default.json"
 
@@ -217,10 +219,16 @@ class AccountRepositoryTests(unittest.TestCase):
         self._connections.append(db)
         return db
 
-    def _import(self, rows):
+    def _import(self, rows, authority="raw_import"):
         source = self.root / f"in{len(list(self.root.glob('in*.jsonl')))}.jsonl"
         source.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
-        return run(source, POLICY, self.db_path, self.root / "out", mode="rules")
+        return run(source, POLICY, self.db_path, self.root / "out", mode="rules",
+                   attribution_authority=authority)
+
+    def _owner(self, cid="p1"):
+        return self._db().execute(
+            "SELECT account_key,attribution_authority FROM account_content_links WHERE content_id=?",
+            (cid,)).fetchone()
 
     def test_same_account_multiple_contents_aggregate(self):
         self._import([pub_row(cid="p1", aid="42", nick="UP主"), pub_row(cid="p2", aid="42", nick="UP主")])
@@ -305,20 +313,108 @@ class AccountRepositoryTests(unittest.TestCase):
         self.assertEqual(account["nickname"], "完整昵称")  # kept, not overwritten with ""
         self.assertEqual(account["profile_url"], "https://space.bilibili.com/42")
 
-    def test_author_reattribution_moves_the_link(self):
-        # P1: the same content later collected under a DIFFERENT author must
-        # move its link - one content item is never credited to two accounts
-        # at once (WP4 interest profiles would otherwise inherit wrong links).
+    def test_conflicting_author_is_recorded_not_overwritten(self):
+        # P1 (review round 4): a plain import must NOT silently take ownership
+        # away from a different account. The conflict is left for confirmation.
         self._import([pub_row(cid="p1", aid="42", nick="原作者")])
-        db = self._db()
-        self.assertEqual(db.execute("SELECT account_key FROM account_content_links WHERE content_id='p1'").fetchone()["account_key"],
-                         "bilibili:42")
+        self.assertEqual(self._owner()["account_key"], "bilibili:42")
         self._import([pub_row(cid="p1", aid="99", nick="修正后的作者")])
-        rows = db.execute("SELECT account_key FROM account_content_links WHERE content_id='p1'").fetchall()
-        self.assertEqual(len(rows), 1)  # exactly one link
-        self.assertEqual(rows[0]["account_key"], "bilibili:99")  # repointed
-        # Both accounts exist; the old author keeps its row but not the link.
+        self.assertEqual(self._owner()["account_key"], "bilibili:42")  # unchanged
+        db = self._db()
+        conflicts = attribution_conflicts(db)
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(conflicts[0]["candidate_account_key"], "bilibili:99")
+        self.assertEqual(conflicts[0]["status"], "pending")
+        self.assertEqual(conflicts[0]["candidate_authority"], "raw_import")
+        self.assertEqual(db.execute("SELECT count(*) FROM account_content_links").fetchone()[0], 1)
         self.assertEqual(db.execute("SELECT count(*) FROM accounts").fetchone()[0], 2)
+
+    def test_higher_authority_reattribution_moves_link_and_audits(self):
+        # Automatic reattribution is allowed ONLY with an explicitly declared
+        # higher source priority, and must leave a resolved audit record.
+        self._import([pub_row(cid="p1", aid="42")])
+        self._import([pub_row(cid="p1", aid="99")], authority="platform_recheck")
+        owner = self._owner()
+        self.assertEqual(owner["account_key"], "bilibili:99")
+        self.assertEqual(owner["attribution_authority"], "platform_recheck")
+        db = self._db()
+        self.assertEqual(db.execute("SELECT count(*) FROM account_content_links").fetchone()[0], 1)
+        resolved = attribution_conflicts(db, status="resolved")
+        self.assertTrue(any(r["candidate_account_key"] == "bilibili:99" for r in resolved))
+
+    def test_replay_of_old_batch_cannot_revert_confirmed_attribution(self):
+        # Review round 4 blocking case: A -> B (corrected) -> replay of A.
+        self._import([pub_row(cid="p1", aid="42", text="原文内容")])
+        self._import([pub_row(cid="p1", aid="99", text="原文内容")], authority="platform_recheck")
+        self.assertEqual(self._owner()["account_key"], "bilibili:99")
+        self._import([pub_row(cid="p1", aid="42", text="原文内容")])  # stale batch, raw_import
+        owner = self._owner()
+        self.assertEqual(owner["account_key"], "bilibili:99")  # NOT reverted
+        self.assertEqual(owner["attribution_authority"], "platform_recheck")
+        db = self._db()
+        self.assertTrue(any(r["candidate_account_key"] == "bilibili:42" for r in attribution_conflicts(db)))
+        self.assertEqual(db.execute("SELECT count(*) FROM account_content_links").fetchone()[0], 1)
+        # Repeated replays must not pile up duplicate conflict rows.
+        self._import([pub_row(cid="p1", aid="42", text="原文内容")])
+        self.assertEqual(len(attribution_conflicts(db)), 1)
+
+    def test_manual_resolution_and_low_authority_cannot_downgrade(self):
+        self._import([pub_row(cid="p1", aid="42")])
+        self._import([pub_row(cid="p1", aid="99")])
+        db = self._db()
+        resolve_attribution_conflict(db, "bilibili", "post", "p1", "bilibili:99",
+                                     authority="manual_review", note="页面复核确认作者")
+        self.assertEqual(self._owner()["account_key"], "bilibili:99")
+        self.assertEqual(self._owner()["attribution_authority"], "manual_review")
+        self.assertEqual(attribution_conflicts(db), [])  # all resolved
+        # A raw replay creates a pending conflict but cannot revert the owner.
+        self._import([pub_row(cid="p1", aid="42")])
+        self.assertEqual(self._owner()["account_key"], "bilibili:99")
+        with self.assertRaises(ValueError):  # cannot downgrade manual_review
+            resolve_attribution_conflict(db, "bilibili", "post", "p1", "bilibili:42",
+                                         authority="raw_import")
+        with self.assertRaises(ValueError):  # unknown account is not a valid choice
+            resolve_attribution_conflict(db, "bilibili", "post", "p1", "bilibili:nope")
+
+    def test_reopened_conflict_after_resolution_is_recorded_again(self):
+        # A once-resolved conflict must be re-raised when the stale candidate
+        # is replayed, without hitting a UNIQUE violation or silently vanishing.
+        self._import([pub_row(cid="p1", aid="42")])
+        self._import([pub_row(cid="p1", aid="99")])
+        db = self._db()
+        resolve_attribution_conflict(db, "bilibili", "post", "p1", "bilibili:42",
+                                     authority="manual_review", note="复核确认仍是原作者")
+        self.assertEqual(attribution_conflicts(db), [])
+        self._import([pub_row(cid="p1", aid="99")])  # stale candidate replayed
+        pending = attribution_conflicts(db)
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["candidate_account_key"], "bilibili:99")
+        self.assertEqual(pending[0]["status"], "pending")  # re-opened
+        self.assertEqual(self._owner()["account_key"], "bilibili:42")
+
+    def test_unknown_authority_is_rejected(self):
+        # Trust level must be explicit and from the allowlist - never invented.
+        with self.assertRaises(ValueError):
+            self._import([pub_row()], authority="superuser")
+
+    def test_analyzed_content_links_exclude_unanalyzed_content(self):
+        # P2 (WP4 contract): workflow.run() writes links BEFORE model analysis.
+        # A failed model call leaves a link with no v2_analyses row; WP4 must
+        # never treat that link as validated interest evidence.
+        self._import([pub_row(cid="p1", aid="42")])
+        db = self._db()
+        link = db.execute("SELECT source_hash FROM account_content_links WHERE content_id='p1'").fetchone()
+        db.execute("DELETE FROM v2_analyses WHERE source_hash=?", (link["source_hash"],))
+        db.commit()
+        self.assertEqual(analyzed_content_links(db, "bilibili:42"), [])
+        self.assertEqual(account_overview(db, "bilibili:42")["content_count"], 1)  # link still there
+        db.execute("INSERT INTO v2_analyses VALUES (?,?,?,?,?,?)",
+                   ("analysis-key-1", link["source_hash"], "policy", "{}",
+                    '{"ok":true}', "2026-11-05T00:00:00+00:00"))
+        db.commit()
+        rows = analyzed_content_links(db, "bilibili:42")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["content_id"], "p1")
 
     def test_failed_account_ingest_rolls_back_whole_batch(self):
         # P1: repository writes now run INSIDE workflow.run()'s transaction.
@@ -402,6 +498,36 @@ class UpstreamIntegrityTests(unittest.TestCase):
         self.assertFalse(self.is_pycache(" M docs/__pycache__readme.md"))
         self.assertFalse(self.is_pycache("?? real_source.py"))
 
+    def test_non_bytecode_files_in_cache_dir_are_rejected(self):
+        # P2: the exception must be scoped to real bytecode cache FILES, not
+        # any arbitrary file planted inside a __pycache__ directory.
+        self.assertFalse(self.is_pycache("?? tools/__pycache__/evil.txt"))
+        self.assertFalse(self.is_pycache("?? tools/__pycache__/README.md"))
+        self.assertFalse(self.is_pycache("?? tools/__pycache__/injected.py"))
+        self.assertFalse(self.is_pycache("?? tools/__pycache__/sub/deeper/evil.pyc"))
+        self.assertFalse(self.is_pycache("?? __pycache__/"))
+
+    def test_verify_upstream_filters_only_real_bytecode_files(self):
+        # .gitignore usually hides __pycache__, but cache paths can still be
+        # reported (force-added files, missing ignore rules). Feed synthetic
+        # status output so the filter is verified independently of local
+        # .gitignore behaviour.
+        import unittest.mock as mock
+        from scripts import mediacrawler_collect as mc
+        sha = mc.ALLOWED_UPSTREAM_COMMITS[0]
+
+        def verify_with(status):
+            def fake(cmd, *args, **kwargs):
+                return status if "status" in cmd else sha + "\n"  # rev-parse
+            with mock.patch.object(mc.subprocess, "check_output", side_effect=fake):
+                return mc.verify_upstream(Path("unused"), expected=sha)
+
+        self.assertEqual(verify_with("?? tools/__pycache__/x.cpython-313.pyc\n"), sha)
+        with self.assertRaises(ValueError):
+            verify_with("?? tools/__pycache__/evil.txt\n")
+        with self.assertRaises(ValueError):
+            verify_with("?? tools/__pycache__/injected.py\n")
+
 
 class MigrationTests(unittest.TestCase):
     def test_migrate_rollback_and_reapply(self):
@@ -419,6 +545,39 @@ class MigrationTests(unittest.TestCase):
                 tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 self.assertIn("accounts", tables)
                 self.assertIn("interest_profiles", tables)
+
+    def test_legacy_links_table_upgraded_in_place(self):
+        # WP3 databases predate attribution_authority + the conflicts table.
+        # migrate() must ALTER in place and keep existing link rows intact.
+        from content_screening.account_repository import migrate
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            db_path = Path(tmp) / "legacy.sqlite"
+            with closing(sqlite3.connect(db_path)) as db:
+                db.executescript("""
+                    CREATE TABLE accounts(account_key TEXT PRIMARY KEY, platform TEXT,
+                        account_id TEXT, nickname TEXT, profile_url TEXT,
+                        identity_source TEXT, identity_mode TEXT,
+                        first_seen_at TEXT, last_seen_at TEXT);
+                    CREATE TABLE account_content_links(account_key TEXT, platform TEXT,
+                        object_type TEXT, content_id TEXT, source_hash TEXT,
+                        first_seen_at TEXT, last_seen_at TEXT,
+                        PRIMARY KEY(account_key,platform,object_type,content_id));
+                """)
+                db.execute("INSERT INTO accounts VALUES (?,?,?,?,?,?,?,?,?)",
+                           ("bilibili:42", "bilibili", "42", "UP主", "", "", "public_source", "t0", "t0"))
+                db.execute("INSERT INTO account_content_links VALUES (?,?,?,?,?,?,?)",
+                           ("bilibili:42", "bilibili", "post", "p1", "hash-old", "t0", "t0"))
+                db.commit()
+            with closing(sqlite3.connect(db_path)) as db:
+                migrate(db)
+                cols = {r[1] for r in db.execute("PRAGMA table_info(account_content_links)")}
+                self.assertIn("attribution_authority", cols)
+                tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                self.assertIn("account_attribution_conflicts", tables)
+                row = db.execute("SELECT * FROM account_content_links").fetchone()
+                self.assertEqual(row[0], "bilibili:42")
+                self.assertEqual(row[4], "hash-old")  # old data preserved
+                self.assertEqual(row[7], "raw_import")  # safe default for legacy rows
 
     def test_interrupted_migration_recovers_and_keeps_data(self):
         # P1: a half-created schema (migration interrupted midway) must be

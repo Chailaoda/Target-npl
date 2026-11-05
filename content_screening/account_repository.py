@@ -43,7 +43,24 @@ CREATE TABLE IF NOT EXISTS account_content_links(
     source_hash TEXT NOT NULL,
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
+    attribution_authority TEXT NOT NULL DEFAULT 'raw_import',
     PRIMARY KEY(account_key, platform, object_type, content_id)
+);
+CREATE TABLE IF NOT EXISTS account_attribution_conflicts(
+    id INTEGER PRIMARY KEY,
+    platform TEXT NOT NULL,
+    object_type TEXT NOT NULL,
+    content_id TEXT NOT NULL,
+    current_account_key TEXT NOT NULL,
+    candidate_account_key TEXT NOT NULL,
+    current_source_hash TEXT NOT NULL DEFAULT '',
+    candidate_source_hash TEXT NOT NULL DEFAULT '',
+    candidate_authority TEXT NOT NULL DEFAULT 'raw_import',
+    status TEXT NOT NULL DEFAULT 'pending',
+    resolution TEXT NOT NULL DEFAULT '',
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    UNIQUE(platform, object_type, content_id, current_account_key, candidate_account_key)
 );
 CREATE TABLE IF NOT EXISTS interest_evidence(
     id INTEGER PRIMARY KEY,
@@ -103,6 +120,13 @@ def migrate(db):
         for statement in SCHEMA.split(";"):
             if statement.strip():
                 db.execute(statement)
+        # WP3 databases already have account_content_links WITHOUT the
+        # attribution_authority column. CREATE TABLE IF NOT EXISTS cannot add
+        # it, so upgrade in place inside the same transaction.
+        cols = {r[1] for r in db.execute("PRAGMA table_info(account_content_links)")}
+        if "attribution_authority" not in cols:
+            db.execute("ALTER TABLE account_content_links ADD COLUMN "
+                       "attribution_authority TEXT NOT NULL DEFAULT 'raw_import'")
         db.execute("COMMIT")
     except Exception:
         db.execute("ROLLBACK")
@@ -171,51 +195,201 @@ def _upsert_account_inner(db, key, profile, nickname, profile_url, row, seen_at)
                        (key, new_nick, new_url, seen_at))
 
 
-def link_content(db, key, record, source_hash, seen_at, *, own_transaction=True):
+# Source priority for author attribution. A plain (replayed) import batch is
+# the weakest evidence; only an explicitly declared higher-authority source
+# may change an existing owner. Never invented from import order or wall clock.
+ATTRIBUTION_AUTHORITY = {"raw_import": 0, "platform_recheck": 1, "manual_review": 2}
+
+
+def _authority_rank(name):
+    if name not in ATTRIBUTION_AUTHORITY:
+        raise ValueError(f"Unknown attribution authority: {name!r}")
+    return ATTRIBUTION_AUTHORITY[name]
+
+
+def link_content(db, key, record, source_hash, seen_at, *,
+                 authority="raw_import", own_transaction=True):
     """Associate a normalized record with its author account (idempotent).
 
     Content version policy: the row points at the CURRENT semantic version
-    (source_hash) of each (account, content). When an edit produces a new
-    source_hash the link is repointed, so account overviews and later
-    interest profiling always read the latest analyzed content — while the
+    (source_hash). An edit produces a new hash and repoints the link, while
     older v2_sources rows stay intact for audit history.
 
-    Author reattribution: if the same content is later collected under a
-    DIFFERENT author (correction/re-upload), the previous account's link is
-    removed so one content item never stays credited to two accounts (P1).
-
-    own_transaction=False when the caller already owns the surrounding
-    transaction (workflow.run()).
+    Author attribution policy (P1, review round 4): an import NEVER silently
+    overwrites a different owner. A conflicting author is recorded as a
+    pending conflict and the confirmed owner is kept, so replaying an OLD
+    batch (A -> B -> replay A) cannot revert a correction. Automatic
+    reattribution is allowed ONLY when the caller explicitly declares a
+    higher source priority (authority > current owner's authority), and is
+    always recorded. Explicit human/source confirmation uses
+    resolve_attribution_conflict().
     """
     if not key:
         return
     if own_transaction:
         with saving(db):
-            _link_content_inner(db, key, record, source_hash, seen_at)
+            _link_content_inner(db, key, record, source_hash, seen_at, authority)
     else:
-        _link_content_inner(db, key, record, source_hash, seen_at)
+        _link_content_inner(db, key, record, source_hash, seen_at, authority)
 
 
-def _link_content_inner(db, key, record, source_hash, seen_at):
-    # Reattribution guard: drop any other account's link to this content first.
-    db.execute("""DELETE FROM account_content_links
-        WHERE platform=? AND object_type=? AND content_id=? AND account_key<>?""",
-        (record["platform"], record["object_type"], record["content_id"], key))
-    db.execute("""INSERT INTO account_content_links(account_key,platform,object_type,content_id,source_hash,first_seen_at,last_seen_at)
-        VALUES (?,?,?,?,?,?,?)
-        ON CONFLICT(account_key,platform,object_type,content_id) DO UPDATE SET
-            source_hash=excluded.source_hash,
-            last_seen_at=excluded.last_seen_at""",
-        (key, record["platform"], record["object_type"], record["content_id"], source_hash, seen_at, seen_at))
+def _insert_link(db, key, record, source_hash, seen_at, authority):
+    db.execute("""INSERT INTO account_content_links(
+        account_key,platform,object_type,content_id,source_hash,
+        first_seen_at,last_seen_at,attribution_authority)
+        VALUES (?,?,?,?,?,?,?,?)""",
+        (key, record["platform"], record["object_type"], record["content_id"],
+         source_hash, seen_at, seen_at, authority))
 
 
-def ingest_observations(db, observations, seen_at, fingerprint_fn):
+def _record_conflict(db, platform, otype, cid, current, candidate, cur_hash,
+                     cand_hash, authority, seen_at, status, resolution):
+    db.execute("""INSERT INTO account_attribution_conflicts(
+        platform,object_type,content_id,current_account_key,candidate_account_key,
+        current_source_hash,candidate_source_hash,candidate_authority,
+        status,resolution,first_seen_at,last_seen_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(platform,object_type,content_id,current_account_key,
+                    candidate_account_key) DO UPDATE SET
+            last_seen_at=excluded.last_seen_at,
+            candidate_source_hash=excluded.candidate_source_hash,
+            candidate_authority=excluded.candidate_authority,
+            status=excluded.status,
+            resolution=excluded.resolution""",
+        (platform, otype, cid, current, candidate, cur_hash, cand_hash,
+         authority, status, resolution, seen_at, seen_at))
+
+
+def _link_content_inner(db, key, record, source_hash, seen_at, authority="raw_import"):
+    rank = _authority_rank(authority)
+    platform, otype, cid = record["platform"], record["object_type"], record["content_id"]
+    where = (platform, otype, cid)
+    existing = db.execute("""SELECT account_key,source_hash,attribution_authority
+        FROM account_content_links WHERE platform=? AND object_type=? AND content_id=?""",
+        where).fetchall()
+    if not existing:
+        _insert_link(db, key, record, source_hash, seen_at, authority)
+        return
+    if len(existing) > 1:
+        # Historical dirty data: never guess which owner is right.
+        _record_conflict(db, platform, otype, cid, existing[0]["account_key"], key,
+                         existing[0]["source_hash"], source_hash, authority, seen_at,
+                         "pending", "multiple existing owners; manual review required")
+        return
+    cur = existing[0]
+    if cur["account_key"] == key:
+        # Idempotent replay / content edit: refresh the version only.
+        # A higher-authority batch may also raise the owner's confidence level.
+        effective = authority if rank > _authority_rank(cur["attribution_authority"]) \
+            else cur["attribution_authority"]
+        db.execute("""UPDATE account_content_links SET source_hash=?,last_seen_at=?,
+            attribution_authority=? WHERE account_key=? AND platform=? AND object_type=? AND content_id=?""",
+            (source_hash, seen_at, effective, key, platform, otype, cid))
+        return
+    cur_rank = _authority_rank(cur["attribution_authority"])
+    if rank > cur_rank:
+        # The ONLY automatic reattribution path: explicitly declared higher
+        # source priority. Move the link and leave a resolved audit record.
+        db.execute("DELETE FROM account_content_links WHERE platform=? AND object_type=? AND content_id=?", where)
+        _insert_link(db, key, record, source_hash, seen_at, authority)
+        db.execute("""UPDATE account_attribution_conflicts SET status='resolved',resolution=?,last_seen_at=?
+            WHERE platform=? AND object_type=? AND content_id=? AND status='pending'""",
+            (f"auto: {authority} outranks {cur['attribution_authority']}", seen_at) + where)
+        _record_conflict(db, platform, otype, cid, cur["account_key"], key,
+                         cur["source_hash"], source_hash, authority, seen_at,
+                         "resolved", f"auto: {authority} outranks {cur['attribution_authority']}")
+        return
+    # Default: keep the confirmed owner, record the conflict for review.
+    # Replaying an old batch lands here - no silent revert, no last-writer-wins.
+    _record_conflict(db, platform, otype, cid, cur["account_key"], key,
+                     cur["source_hash"], source_hash, authority, seen_at, "pending", "")
+
+
+def resolve_attribution_conflict(db, platform, object_type, content_id, chosen_key, *,
+                                 authority="manual_review", note="", own_transaction=True):
+    """Explicitly confirm an author attribution (never called by import batches).
+
+    chosen_key must be the current owner or a recorded pending candidate.
+    The resolution cannot DOWNGRADE an owner confirmed by a higher authority.
+    """
+    rank = _authority_rank(authority)
+    seen_at = datetime.now(timezone.utc).isoformat()
+    where = (platform, object_type, content_id)
+
+    def _resolve():
+        cur = db.execute("""SELECT * FROM account_content_links
+            WHERE platform=? AND object_type=? AND content_id=?""", where).fetchall()
+        if not cur:
+            raise ValueError("No content link to resolve")
+        pending = db.execute("""SELECT * FROM account_attribution_conflicts
+            WHERE platform=? AND object_type=? AND content_id=? AND status='pending'""", where).fetchall()
+        allowed = {r["account_key"] for r in cur} | {r["candidate_account_key"] for r in pending}
+        if chosen_key not in allowed:
+            raise ValueError("Chosen account is neither the current owner nor a recorded conflict candidate")
+        cur_rank = max(_authority_rank(r["attribution_authority"]) for r in cur)
+        if rank < cur_rank:
+            raise ValueError("Resolution authority is lower than the current attribution")
+        owner = next((r for r in cur if r["account_key"] == chosen_key), None)
+        source_hash = owner["source_hash"] if owner else \
+            next(r["candidate_source_hash"] for r in pending if r["candidate_account_key"] == chosen_key)
+        db.execute("DELETE FROM account_content_links WHERE platform=? AND object_type=? AND content_id=?", where)
+        db.execute("""INSERT INTO account_content_links(
+            account_key,platform,object_type,content_id,source_hash,
+            first_seen_at,last_seen_at,attribution_authority)
+            VALUES (?,?,?,?,?,?,?,?)""",
+            (chosen_key, platform, object_type, content_id, source_hash, seen_at, seen_at, authority))
+        db.execute("""UPDATE account_attribution_conflicts SET status='resolved',resolution=?,last_seen_at=?
+            WHERE platform=? AND object_type=? AND content_id=? AND status='pending'""",
+            (f"manual: {note or authority}", seen_at) + where)
+        return chosen_key
+
+    if own_transaction:
+        with saving(db):
+            return _resolve()
+    return _resolve()
+
+
+def attribution_conflicts(db, *, status="pending", account_key=None):
+    """Query attribution conflicts awaiting (or after) confirmation (WP5/WP6)."""
+    rows = db.execute("""SELECT * FROM account_attribution_conflicts
+        WHERE status=? ORDER BY id""", (status,)).fetchall()
+    result = [dict(r) for r in rows]
+    if account_key:
+        result = [r for r in result if account_key in
+                  (r["current_account_key"], r["candidate_account_key"])]
+    return result
+
+
+def analyzed_content_links(db, key):
+    """WP4: verified interest evidence ONLY.
+
+    account_content_links is written by workflow.run() BEFORE model analysis;
+    a failed model call leaves a link pointing at content with no successful
+    analysis. WP4 must never treat that link as validated evidence. This
+    helper returns only links whose source_hash has a stored v2_analyses
+    result; consumers should additionally honour review/quarantine state.
+    """
+    try:
+        return [dict(r) for r in db.execute("""SELECT l.* FROM account_content_links l
+            JOIN v2_analyses a ON a.source_hash = l.source_hash
+            WHERE l.account_key=? AND a.result_json IS NOT NULL AND a.result_json <> ''
+            ORDER BY l.content_id""", (key,))]
+    except sqlite3.OperationalError:
+        return []  # analysis tables not created yet (fresh/legacy database)
+
+
+def ingest_observations(db, observations, seen_at, fingerprint_fn,
+                        attribution_authority="raw_import"):
     """Ingest profile payloads and content links for one import run.
 
     Runs INSIDE the caller's transaction (workflow.run()'s outer `with db:`);
     repository functions are called with own_transaction=False so the whole
     import batch (sources, tasks, observations, accounts, links) commits or
     rolls back together. Anonymous/unknown rows are skipped entirely.
+
+    attribution_authority is an EXPLICIT declaration by the caller about the
+    trust level of this batch. Plain/replayed imports keep 'raw_import' and
+    can never overwrite a confirmed owner.
     """
     keys = {}
     for obs in observations:
@@ -226,7 +400,8 @@ def ingest_observations(db, observations, seen_at, fingerprint_fn):
         key = upsert_account(db, profile, seen_at, own_transaction=False)
         if key:
             keys[key] = True
-            link_content(db, key, record, fingerprint_fn(record), seen_at, own_transaction=False)
+            link_content(db, key, record, fingerprint_fn(record), seen_at,
+                         authority=attribution_authority, own_transaction=False)
     return sorted(keys)
 
 

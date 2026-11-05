@@ -88,7 +88,7 @@ def save_abstention(db, job_id, source_hash, key, policy_hash, record, policy, c
     db.execute("UPDATE v2_tasks SET status='needs_review',error_code=? WHERE job_id=? AND source_hash=?", (code, job_id, source_hash))
 
 
-def run(input_path, policy_path, db_path, output, mode="rules", connection_path="config/connection.json", max_calls=40, analyzer=None, job_id=None,task=None,config_revision=None,on_start=None):
+def run(input_path, policy_path, db_path, output, mode="rules", connection_path="config/connection.json", max_calls=40, analyzer=None, job_id=None,task=None,config_revision=None,on_start=None,attribution_authority="raw_import"):
     policy = load_policy(policy_path)
     if task is not None:validate_task(task)
     observations = read_export(input_path)
@@ -161,8 +161,13 @@ def run(input_path, policy_path, db_path, output, mode="rules", connection_path=
             # profile data lives in account tables only; it never participates
             # in source_hash/analysis_key, so profile updates cannot invalidate
             # cached analyses. Anonymous/unknown rows are skipped untouched.
+            # NOTE: these links describe the latest COLLECTED version and are
+            # written BEFORE model analysis - WP4 must use
+            # account_repository.analyzed_content_links() for verified evidence.
+            # attribution_authority is explicit: plain/replayed imports stay at
+            # 'raw_import' and cannot silently revert a confirmed attribution.
             from .account_repository import ingest_observations as _ingest_accounts
-            _ingest_accounts(db, observations, utcnow(), fingerprint)
+            _ingest_accounts(db, observations, utcnow(), fingerprint, attribution_authority)
         if on_start is not None:on_start(job_id)
         calls, reused, errors, tokens, consecutive_errors = 0, 0, 0, 0, 0
         try:

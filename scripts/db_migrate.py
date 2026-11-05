@@ -20,7 +20,8 @@ if str(ROOT) not in sys.path:
 from content_screening.account_repository import SCHEMA, migrate  # noqa: E402
 
 NEW_TABLES = ("accounts", "account_profile_history", "account_content_links",
-              "interest_evidence", "interest_profiles", "interest_profile_versions")
+              "interest_evidence", "interest_profiles", "interest_profile_versions",
+              "account_attribution_conflicts")
 
 
 def rollback(db):

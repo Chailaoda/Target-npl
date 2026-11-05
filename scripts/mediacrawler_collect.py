@@ -31,11 +31,12 @@ def _public_accounts_flag():
 
 
 def _is_pycache_entry(status_line):
-    """True only when the changed path lives INSIDE a __pycache__ directory.
+    """True only for a real Python bytecode cache FILE inside a __pycache__ dir.
 
-    Matches by path COMPONENTS (PurePosixPath.parts), so a file merely named
-    "__pycache__-notes.md" or "evil__pycache__.py" is NOT tolerated - only
-    real bytecode cache directories (e.g. "tools/__pycache__/x.pyc") are.
+    Matching by path COMPONENTS + strict parent directory + filename suffix
+    prevents disguised names ("__pycache__-notes.md", "evil__pycache__.py")
+    and arbitrary files planted inside a cache directory from being tolerated.
+    Only *.pyc / *.pyo directly under a __pycache__ component are allowed.
     """
     from pathlib import PurePosixPath
     raw = status_line[3:].strip()
@@ -43,7 +44,9 @@ def _is_pycache_entry(status_line):
         raw = raw[1:-1]
     # git quotes non-ascii/special chars with C-style escapes
     raw = raw.encode().decode("unicode_escape") if "\\u" in raw or "\\x" in raw else raw
-    return "__pycache__" in PurePosixPath(raw.replace("\\\\", "\\")).parts
+    parts = PurePosixPath(raw.replace("\\\\", "\\")).parts
+    return len(parts) >= 2 and parts[-2] == "__pycache__" \
+        and parts[-1].endswith((".pyc", ".pyo"))
 
 
 def verify_upstream(upstream, expected=None):
