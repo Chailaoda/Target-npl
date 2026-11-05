@@ -305,6 +305,52 @@ class AccountRepositoryTests(unittest.TestCase):
         self.assertEqual(account["nickname"], "完整昵称")  # kept, not overwritten with ""
         self.assertEqual(account["profile_url"], "https://space.bilibili.com/42")
 
+    def test_author_reattribution_moves_the_link(self):
+        # P1: the same content later collected under a DIFFERENT author must
+        # move its link - one content item is never credited to two accounts
+        # at once (WP4 interest profiles would otherwise inherit wrong links).
+        self._import([pub_row(cid="p1", aid="42", nick="原作者")])
+        db = self._db()
+        self.assertEqual(db.execute("SELECT account_key FROM account_content_links WHERE content_id='p1'").fetchone()["account_key"],
+                         "bilibili:42")
+        self._import([pub_row(cid="p1", aid="99", nick="修正后的作者")])
+        rows = db.execute("SELECT account_key FROM account_content_links WHERE content_id='p1'").fetchall()
+        self.assertEqual(len(rows), 1)  # exactly one link
+        self.assertEqual(rows[0]["account_key"], "bilibili:99")  # repointed
+        # Both accounts exist; the old author keeps its row but not the link.
+        self.assertEqual(db.execute("SELECT count(*) FROM accounts").fetchone()[0], 2)
+
+    def test_failed_account_ingest_rolls_back_whole_batch(self):
+        # P1: repository writes now run INSIDE workflow.run()'s transaction.
+        # If the second account fails mid-import, the entire batch (sources,
+        # tasks, observations, accounts, links) must roll back together -
+        # no partial import state.
+        import unittest.mock as mock
+        from content_screening.account_repository import _upsert_account_inner
+        real = _upsert_account_inner
+        seen = []
+
+        def flaky(db, key, profile, nickname, profile_url, row, seen_at):
+            if seen:
+                raise sqlite3.OperationalError("injected failure on second account")
+            seen.append(key)
+            return real(db, key, profile, nickname, profile_url, row, seen_at)
+
+        db = self._db()
+        with mock.patch("content_screening.account_repository._upsert_account_inner", side_effect=flaky):
+            try:
+                self._import([pub_row(cid="p1", aid="42", nick="第一个账号"),
+                              pub_row(cid="p2", aid="77", nick="第二个账号")])
+            except sqlite3.OperationalError:
+                pass
+            else:
+                self.fail("injected failure should propagate")
+        # Whole batch rolled back: no sources, no analyses, no accounts, no links.
+        db2 = self._db()
+        for table in ("v2_sources", "v2_analyses", "accounts", "account_content_links"):
+            count = db2.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+            self.assertEqual(count, 0, f"{table} leaked rows after failed batch")
+
     def test_active_days_are_calendar_dates(self):
         # P2: same UTC date with different timestamps counts as ONE active day.
         self._import([pub_row(cid="p1", aid="42", published="2026-10-30T01:00:00+00:00"),
@@ -315,6 +361,17 @@ class AccountRepositoryTests(unittest.TestCase):
         self.assertEqual(overview["content_count"], 3)
         self.assertEqual(overview["active_days"], 2)  # Oct 30 + Oct 31, not 3
 
+    def test_active_days_normalize_non_utc_offsets(self):
+        # P2: +08:00 timestamps must be converted to UTC dates, not string-sliced.
+        # 2026-10-30 22:00 +08:00 == 2026-10-30 14:00 UTC (same UTC date)
+        # 2026-10-31 02:00 +08:00 == 2026-10-30 18:00 UTC (PREVIOUS UTC date!)
+        self._import([pub_row(cid="p1", aid="42", published="2026-10-30T22:00:00+08:00"),
+                      pub_row(cid="p2", aid="42", published="2026-10-31T02:00:00+08:00"),
+                      pub_row(cid="p3", aid="42", published="2026-10-30T14:00:00+00:00")])
+        db = self._db()
+        overview = account_overview(db, "bilibili:42")
+        self.assertEqual(overview["active_days"], 1)  # all three are ONE UTC date
+
     def test_overview_and_search(self):
         self._import([pub_row(cid="p1", aid="42"), pub_row(cid="p2", aid="42")])
         db = self._db()
@@ -324,6 +381,26 @@ class AccountRepositoryTests(unittest.TestCase):
         self.assertEqual(overview["active_days"], 1)
         found, total = search_accounts(db, "UP主")
         self.assertEqual((total, found[0]["account_key"]), (1, "bilibili:42"))
+
+
+class UpstreamIntegrityTests(unittest.TestCase):
+    """P2: the __pycache__ exception must match path COMPONENTS, not substrings."""
+
+    def setUp(self):
+        from scripts.mediacrawler_collect import _is_pycache_entry
+        self.is_pycache = _is_pycache_entry
+
+    def test_real_pycache_directories_are_tolerated(self):
+        self.assertTrue(self.is_pycache("?? tools/__pycache__/x.cpython-313.pyc"))
+        self.assertTrue(self.is_pycache(" M store/douyin/__pycache__/y.pyc"))
+        self.assertTrue(self.is_pycache("?? __pycache__/z.pyc"))
+
+    def test_disguised_filenames_are_rejected(self):
+        # A file NAMED like the cache dir but not inside one must be rejected.
+        self.assertFalse(self.is_pycache("?? __pycache__-notes.md"))
+        self.assertFalse(self.is_pycache("?? evil__pycache__.py"))
+        self.assertFalse(self.is_pycache(" M docs/__pycache__readme.md"))
+        self.assertFalse(self.is_pycache("?? real_source.py"))
 
 
 class MigrationTests(unittest.TestCase):

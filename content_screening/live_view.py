@@ -11,6 +11,12 @@ def _person_key(candidate):
     Never groups by nickname. Anonymous hashes are NOT globally unique - the
     same hash can occur on different platforms - so every key is namespaced
     by platform (A03). Records without any author key stay per-content.
+
+    NOTE: this is a DISPLAY key, not the database account key. Public
+    account keys already contain the platform prefix (e.g. "bilibili:42"),
+    so grouping yields "bilibili:bilibili:42" - harmless for display, but
+    WP5/WP6 must query account_repository by the ORIGINAL author_key, never
+    by this grouped display key.
     """
     platform = candidate.get('platform')
     author_key = candidate.get('author_key') or ""

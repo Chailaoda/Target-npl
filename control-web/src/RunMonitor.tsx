@@ -94,6 +94,17 @@ const FEED_LIMIT = 400
 const clock = () => new Date().toLocaleTimeString('zh-CN', { hour12: false })
 const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
+// Person grouping key. Anonymous hashes are NOT globally unique across
+// platforms, so every key is namespaced by platform (A03). Records without
+// a stable author key stay per-content: a template literal like
+// `${p}:${a}` is truthy even when `a` is empty, so the fallback MUST be a
+// conditional expression - `||` after a template literal is dead code.
+export function personGroupKey(item: { platform: string; author_key?: string | null; id?: string | number }): string {
+  return item.author_key
+    ? `${item.platform}:${item.author_key}`
+    : `${item.platform}:content:${item.id}`
+}
+
 function highlight(text: string, words: string[]): ReactNode {
   const list = Array.from(new Set(words.map(w => w.trim()).filter(Boolean)))
   if (!list.length) return text
@@ -256,9 +267,7 @@ export default function RunMonitor({
     for (const item of live?.candidates || []) {
       const isExact = item.evidence_level === 'explicit' || (!item.evidence_level && (item.score || 0) >= 70)
       const isPotential = item.evidence_level === 'related_only' || (item.quality_flags || []).includes('tier_potential') || (!isExact && (item.score || 0) >= 50)
-      // Anonymous hashes are not globally unique across platforms - always
-      // namespace the person key with the platform before grouping (A03).
-      const key = `${item.platform}:${item.author_key}` || `${item.platform}:content:${item.id}`
+      const key = personGroupKey(item)
       const existing = map.get(key)
       if (!existing) {
         map.set(key, { personKey: key, platform: item.platform, authorName: item.author?.trim() || '公开平台用户', authorUrl: item.author_url, highestScore: item.score || 0, isExact, isPotential, records: [item] })

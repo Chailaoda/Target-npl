@@ -30,12 +30,29 @@ def _public_accounts_flag():
     return "1" if os.environ.get("TARGET_NPL_PUBLIC_ACCOUNTS", "auto") in ("1", "auto") else ""
 
 
+def _is_pycache_entry(status_line):
+    """True only when the changed path lives INSIDE a __pycache__ directory.
+
+    Matches by path COMPONENTS (PurePosixPath.parts), so a file merely named
+    "__pycache__-notes.md" or "evil__pycache__.py" is NOT tolerated - only
+    real bytecode cache directories (e.g. "tools/__pycache__/x.pyc") are.
+    """
+    from pathlib import PurePosixPath
+    raw = status_line[3:].strip()
+    if raw.startswith('"') and raw.endswith('"'):
+        raw = raw[1:-1]
+    # git quotes non-ascii/special chars with C-style escapes
+    raw = raw.encode().decode("unicode_escape") if "\\u" in raw or "\\x" in raw else raw
+    return "__pycache__" in PurePosixPath(raw.replace("\\\\", "\\")).parts
+
+
 def verify_upstream(upstream, expected=None):
     """检查 vendor 目录 HEAD 在兼容提交白名单内且工作树干净。
 
     完整性检查使用 git status --porcelain --untracked-files=all：同时覆盖
     已暂存修改、未暂存修改与未跟踪文件（git diff --name-only 会漏掉后两者）。
-    唯一允许的例外是 Python 运行时产物 __pycache__（不影响源码完整性）。
+    唯一允许的例外是位于 __pycache__ 目录内的 Python 运行时产物
+    （按路径组成部分精确判断，文件名伪装不算）。
     """
     sha = subprocess.check_output(["git", "-C", str(upstream), "rev-parse", "HEAD"], text=True).strip()
     allowed = ALLOWED_UPSTREAM_COMMITS if expected is None else (expected,)
@@ -44,9 +61,7 @@ def verify_upstream(upstream, expected=None):
     status = subprocess.check_output(
         ["git", "-C", str(upstream), "status", "--porcelain", "--untracked-files=all"],
         text=True).splitlines()
-    dirty = [line for line in status
-             if line and not line[3:].lstrip('"').replace("\\\\", "\\").replace("\\/", "/").startswith("__pycache__")
-             and "__pycache__" not in line]
+    dirty = [line for line in status if line and not _is_pycache_entry(line)]
     if dirty:
         raise ValueError("Pinned upstream working tree is dirty; review adapter compatibility first")
     return sha

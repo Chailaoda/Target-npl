@@ -13,6 +13,7 @@ WP3 of the public-account-profiles plan. Design rules:
 import json
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts(
@@ -112,16 +113,28 @@ def migrate(db):
 
 @contextmanager
 def saving(db):
+    """Explicit standalone transaction, for callers that do NOT already own one.
+
+    NOTE: workflow.run() owns one transaction for the whole import batch and
+    calls upsert_account/link_content/ingest_observations INSIDE it; those
+    functions therefore never open transactions themselves. Calling `with db:`
+    inside an outer `with db:` block would commit the outer transaction
+    prematurely and destroy batch atomicity. Use this helper only from
+    top-level callers (tests, one-off scripts).
+    """
     with db:
         yield
 
 
-def upsert_account(db, profile, seen_at):
+def upsert_account(db, profile, seen_at, *, own_transaction=True):
     """Insert or refresh a public account row; record profile changes in history.
 
     profile: dict from normalization.normalize_profile() or equivalent
     (platform, account_id, nickname, profile_url, identity_source,
     identity_mode). Missing fields default to '' — never invented.
+
+    own_transaction=False when the caller already owns the surrounding
+    transaction (workflow.run()); True for standalone top-level calls.
     """
     key = account_key(profile.get("platform"), profile.get("account_id"))
     if not key or profile.get("identity_mode") != "public_source":
@@ -129,29 +142,36 @@ def upsert_account(db, profile, seen_at):
     nickname = profile.get("nickname", "") or ""
     profile_url = profile.get("profile_url", "") or ""
     row = db.execute("SELECT nickname,profile_url FROM accounts WHERE account_key=?", (key,)).fetchone()
-    with saving(db):
-        if row is None:
-            db.execute("INSERT INTO accounts VALUES (?,?,?,?,?,?,?,?,?)",
-                       (key, profile["platform"], profile["account_id"], nickname, profile_url,
-                        profile.get("identity_source", ""), profile.get("identity_mode", "public_source"),
-                        seen_at, seen_at))
-            db.execute("INSERT INTO account_profile_history(account_key,nickname,profile_url,observed_at) VALUES (?,?,?,?)",
-                       (key, nickname, profile_url, seen_at))
-        else:
-            # Profile refresh: never touches content analysis caches.
-            # Missing (empty) values from a new batch never erase known values:
-            # platform fields the API simply did not return this time are kept.
-            new_nick = nickname or row["nickname"]
-            new_url = profile_url or row["profile_url"]
-            db.execute("UPDATE accounts SET nickname=?,profile_url=?,last_seen_at=? WHERE account_key=?",
-                       (new_nick, new_url, seen_at, key))
-            if (row["nickname"], row["profile_url"]) != (new_nick, new_url):
-                db.execute("INSERT INTO account_profile_history(account_key,nickname,profile_url,observed_at) VALUES (?,?,?,?)",
-                           (key, new_nick, new_url, seen_at))
+    if own_transaction:
+        with saving(db):
+            _upsert_account_inner(db, key, profile, nickname, profile_url, row, seen_at)
+    else:
+        _upsert_account_inner(db, key, profile, nickname, profile_url, row, seen_at)
     return key
 
 
-def link_content(db, key, record, source_hash, seen_at):
+def _upsert_account_inner(db, key, profile, nickname, profile_url, row, seen_at):
+    if row is None:
+        db.execute("INSERT INTO accounts VALUES (?,?,?,?,?,?,?,?,?)",
+                   (key, profile["platform"], profile["account_id"], nickname, profile_url,
+                    profile.get("identity_source", ""), profile.get("identity_mode", "public_source"),
+                    seen_at, seen_at))
+        db.execute("INSERT INTO account_profile_history(account_key,nickname,profile_url,observed_at) VALUES (?,?,?,?)",
+                   (key, nickname, profile_url, seen_at))
+    else:
+        # Profile refresh: never touches content analysis caches.
+        # Missing (empty) values from a new batch never erase known values:
+        # platform fields the API simply did not return this time are kept.
+        new_nick = nickname or row["nickname"]
+        new_url = profile_url or row["profile_url"]
+        db.execute("UPDATE accounts SET nickname=?,profile_url=?,last_seen_at=? WHERE account_key=?",
+                   (new_nick, new_url, seen_at, key))
+        if (row["nickname"], row["profile_url"]) != (new_nick, new_url):
+            db.execute("INSERT INTO account_profile_history(account_key,nickname,profile_url,observed_at) VALUES (?,?,?,?)",
+                       (key, new_nick, new_url, seen_at))
+
+
+def link_content(db, key, record, source_hash, seen_at, *, own_transaction=True):
     """Associate a normalized record with its author account (idempotent).
 
     Content version policy: the row points at the CURRENT semantic version
@@ -159,23 +179,43 @@ def link_content(db, key, record, source_hash, seen_at):
     source_hash the link is repointed, so account overviews and later
     interest profiling always read the latest analyzed content — while the
     older v2_sources rows stay intact for audit history.
+
+    Author reattribution: if the same content is later collected under a
+    DIFFERENT author (correction/re-upload), the previous account's link is
+    removed so one content item never stays credited to two accounts (P1).
+
+    own_transaction=False when the caller already owns the surrounding
+    transaction (workflow.run()).
     """
     if not key:
         return
-    with saving(db):
-        db.execute("""INSERT INTO account_content_links(account_key,platform,object_type,content_id,source_hash,first_seen_at,last_seen_at)
-            VALUES (?,?,?,?,?,?,?)
-            ON CONFLICT(account_key,platform,object_type,content_id) DO UPDATE SET
-                source_hash=excluded.source_hash,
-                last_seen_at=excluded.last_seen_at""",
-            (key, record["platform"], record["object_type"], record["content_id"], source_hash, seen_at, seen_at))
+    if own_transaction:
+        with saving(db):
+            _link_content_inner(db, key, record, source_hash, seen_at)
+    else:
+        _link_content_inner(db, key, record, source_hash, seen_at)
+
+
+def _link_content_inner(db, key, record, source_hash, seen_at):
+    # Reattribution guard: drop any other account's link to this content first.
+    db.execute("""DELETE FROM account_content_links
+        WHERE platform=? AND object_type=? AND content_id=? AND account_key<>?""",
+        (record["platform"], record["object_type"], record["content_id"], key))
+    db.execute("""INSERT INTO account_content_links(account_key,platform,object_type,content_id,source_hash,first_seen_at,last_seen_at)
+        VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(account_key,platform,object_type,content_id) DO UPDATE SET
+            source_hash=excluded.source_hash,
+            last_seen_at=excluded.last_seen_at""",
+        (key, record["platform"], record["object_type"], record["content_id"], source_hash, seen_at, seen_at))
 
 
 def ingest_observations(db, observations, seen_at, fingerprint_fn):
     """Ingest profile payloads and content links for one import run.
 
-    Anonymous/unknown rows are skipped entirely (no account rows, no links);
-    their analyses remain untouched in the v2_* tables.
+    Runs INSIDE the caller's transaction (workflow.run()'s outer `with db:`);
+    repository functions are called with own_transaction=False so the whole
+    import batch (sources, tasks, observations, accounts, links) commits or
+    rolls back together. Anonymous/unknown rows are skipped entirely.
     """
     keys = {}
     for obs in observations:
@@ -183,10 +223,10 @@ def ingest_observations(db, observations, seen_at, fingerprint_fn):
         record = obs["record"]
         if not profile or profile.get("identity_mode") != "public_source":
             continue
-        key = upsert_account(db, profile, seen_at)
+        key = upsert_account(db, profile, seen_at, own_transaction=False)
         if key:
             keys[key] = True
-            link_content(db, key, record, fingerprint_fn(record), seen_at)
+            link_content(db, key, record, fingerprint_fn(record), seen_at, own_transaction=False)
     return sorted(keys)
 
 
@@ -200,15 +240,18 @@ def account_overview(db, key):
     content_count = db.execute("SELECT count(*) FROM account_content_links WHERE account_key=?", (key,)).fetchone()[0]
     # Active days are distinct UTC calendar dates, not distinct raw timestamps
     # (two posts at 09:00 and 15:00 the same day count as ONE active day).
+    # Values may carry non-UTC offsets (+08:00 etc.) or be empty - parse the
+    # timezone and normalize to the UTC date instead of slicing the raw text.
+    from datetime import datetime as _dt
     days = set()
     for link in db.execute("SELECT source_hash FROM account_content_links WHERE account_key=?", (key,)).fetchall():
         src = db.execute("SELECT source_json FROM v2_sources WHERE source_hash=?", (link["source_hash"],)).fetchone() if _has_column(db) else None
         if src:
             try:
                 published = json.loads(src["source_json"]).get("published_at", "")
-                # ISO-8601 date part only: stable UTC calendar-day bucketing.
-                if isinstance(published, str) and len(published) >= 10:
-                    days.add(published[:10])
+                if isinstance(published, str) and published:
+                    dt = _dt.fromisoformat(published)  # offset-aware ISO-8601
+                    days.add(dt.astimezone(timezone.utc).date().isoformat())
             except (ValueError, TypeError):
                 pass
     history = db.execute("SELECT nickname,profile_url,observed_at FROM account_profile_history WHERE account_key=? ORDER BY id", (key,)).fetchall()
