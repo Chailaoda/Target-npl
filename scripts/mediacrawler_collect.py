@@ -31,11 +31,24 @@ def _public_accounts_flag():
 
 
 def verify_upstream(upstream, expected=None):
-    """检查 vendor 目录 HEAD 在兼容提交白名单内且工作树干净。"""
+    """检查 vendor 目录 HEAD 在兼容提交白名单内且工作树干净。
+
+    完整性检查使用 git status --porcelain --untracked-files=all：同时覆盖
+    已暂存修改、未暂存修改与未跟踪文件（git diff --name-only 会漏掉后两者）。
+    唯一允许的例外是 Python 运行时产物 __pycache__（不影响源码完整性）。
+    """
     sha = subprocess.check_output(["git", "-C", str(upstream), "rev-parse", "HEAD"], text=True).strip()
     allowed = ALLOWED_UPSTREAM_COMMITS if expected is None else (expected,)
-    if sha not in allowed or subprocess.check_output(["git", "-C", str(upstream), "diff", "--name-only"], text=True).strip():
+    if sha not in allowed:
         raise ValueError("Pinned upstream changed; review adapter compatibility first")
+    status = subprocess.check_output(
+        ["git", "-C", str(upstream), "status", "--porcelain", "--untracked-files=all"],
+        text=True).splitlines()
+    dirty = [line for line in status
+             if line and not line[3:].lstrip('"').replace("\\\\", "\\").replace("\\/", "/").startswith("__pycache__")
+             and "__pycache__" not in line]
+    if dirty:
+        raise ValueError("Pinned upstream working tree is dirty; review adapter compatibility first")
     return sha
 
 
@@ -375,8 +388,16 @@ def main():
             raise ValueError("Invalid/existing receipt path")
     upstream = ROOT / "vendor/MediaCrawler"
     sha = verify_upstream(upstream)
-    # 采集子进程内启用公开账号字段透传（仅受控 fork 支持；上游原版忽略此开关）。
-    os.environ["TARGET_NPL_PUBLIC_ACCOUNTS"] = "1" if sha == FORK_COMMIT else ""
+    # 公开账号字段透传的启用条件（三层，评审要求明确化）：
+    # 1) 外部显式设置 TARGET_NPL_PUBLIC_ACCOUNTS=0 -> 强制关闭（尊重操作者意愿）
+    # 2) 外部显式设置 =1 -> 开启（且仅当运行的是受控 fork 时实际生效）
+    # 3) 未设置（默认 auto）-> 检测到受控 fork 提交时自动开启，上游原版保持关闭
+    # 依据：third_party/mediacrawler.json 中登记的字段授权范围仅覆盖受控 fork。
+    override = os.environ.get("TARGET_NPL_PUBLIC_ACCOUNTS")
+    if override == "0":
+        os.environ["TARGET_NPL_PUBLIC_ACCOUNTS"] = ""
+    else:
+        os.environ["TARGET_NPL_PUBLIC_ACCOUNTS"] = "1" if sha == FORK_COMMIT else ""
     job_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     job = Path(args.resume_job).resolve() if args.resume_job else ROOT / "data/collections" / job_id
     if not job.is_relative_to(ROOT / "data/collections") or job == ROOT / "data/collections":

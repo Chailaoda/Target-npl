@@ -5,6 +5,20 @@ from collections import deque
 from contextlib import closing
 
 
+def _person_key(candidate):
+    """Display grouping key for one candidate record.
+
+    Never groups by nickname. Anonymous hashes are NOT globally unique - the
+    same hash can occur on different platforms - so every key is namespaced
+    by platform (A03). Records without any author key stay per-content.
+    """
+    platform = candidate.get('platform')
+    author_key = candidate.get('author_key') or ""
+    if author_key:
+        return f"{platform}:{author_key}"
+    return f"{platform}:content:{candidate.get('id')}"
+
+
 def latest(service):
     files=list(service.runs.glob('*/status.json'))
     if not files:return None
@@ -94,9 +108,7 @@ def live(service,run_id):
     person_exact = set()
     person_potential = set()
     for c in candidates:
-        # Never group people by nickname: without a stable author key the
-        # analysis key itself keeps records distinct within a platform.
-        pkey = c.get('author_key') or f"{c.get('platform')}:content:{c.get('id')}"
+        pkey = _person_key(c)
         if c.get('evidence_level') == 'explicit':
             person_exact.add(pkey)
         elif c.get('evidence_level') == 'related_only' or 'tier_potential' in c.get('quality_flags', []):

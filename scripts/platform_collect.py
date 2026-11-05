@@ -149,7 +149,9 @@ def main():
     import subprocess
     upstream=ROOT/'vendor/MediaCrawler'
     sha=verify_upstream(upstream)
-    os.environ['TARGET_NPL_PUBLIC_ACCOUNTS']='1' if sha==FORK_COMMIT else ''
+    # 同 mediacrawler_collect.py：显式 0 强制关闭；默认 auto 时受控 fork 自动开启。
+    override=os.environ.get('TARGET_NPL_PUBLIC_ACCOUNTS')
+    os.environ['TARGET_NPL_PUBLIC_ACCOUNTS']='' if override=='0' else ('1' if sha==FORK_COMMIT else '')
     os.environ['TARGET_NPL_UPSTREAM_SHA']=sha
     job=ROOT/'data/collections'/datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ');job.mkdir(parents=True,exist_ok=False)
     sys.path.insert(0,str(upstream));os.chdir(upstream)

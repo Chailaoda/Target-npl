@@ -44,7 +44,99 @@ def anon_row(cid="c1", chash="abc", text="匿名内容示例活动"):
                      "creator_hash": chash, "nickname": "示***例", "create_time": 1793352000}}
 
 
+def douyin_post_fork(aid="dy-123", nick="抖音作者", cid="7000000000000000001", text="开源Agent实战分享"):
+    """Raw Douyin aweme record as emitted by the controlled fork (author fields present)."""
+    return {"object_type": "post", "keyword": "Agent",
+            "data": {"aweme_id": cid, "desc": text, "create_time": 1793352000,
+                     "creator_hash": "legacy-hash", "nickname": "匿***称",
+                     "author_id": aid, "author_nickname": nick,
+                     "author_profile_url": f"https://www.douyin.com/user/{aid}",
+                     "statistics": {"digg_count": 5}}}
+
+
+def douyin_comment_fork(aid="dy-123", nick="抖音作者", cid="7000000000000000002", text="求教程，想搭子一起学"):
+    """Raw Douyin comment record as emitted by the controlled fork."""
+    return {"object_type": "comment", "keyword": "Agent",
+            "data": {"comment_id": cid, "aweme_id": "7000000000000000001", "content": text,
+                     "parent_comment_id": "0", "create_time": 1793352100,
+                     "creator_hash": "legacy-hash", "nickname": "匿***称",
+                     "author_id": aid, "author_nickname": nick}}
+
+
+class DouyinForkPassthroughTests(unittest.TestCase):
+    """P0: raw Douyin (aweme_id) records from the controlled fork must reach
+    the new accounts pipeline — while legacy anonymized rows stay identical."""
+
+    def test_fork_douyin_post_takes_public_path(self):
+        record = normalize(douyin_post_fork())
+        self.assertEqual(record["author_key"], "douyin:dy-123")
+        self.assertEqual(record["identity_mode"], "public_source")
+        self.assertEqual(record["content_id"], "7000000000000000001")
+        # Display fields never join the semantic record (cache stability).
+        self.assertEqual(record["author"], "")
+        self.assertEqual(record["author_url"], "")
+        profile = normalize_profile(douyin_post_fork())
+        self.assertEqual(profile["account_id"], "dy-123")
+        self.assertEqual(profile["nickname"], "抖音作者")
+        self.assertEqual(profile["profile_url"], "https://www.douyin.com/user/dy-123")
+
+    def test_fork_douyin_comment_takes_public_path(self):
+        record = normalize(douyin_comment_fork())
+        self.assertEqual(record["author_key"], "douyin:dy-123")
+        self.assertEqual(record["identity_mode"], "public_source")
+        self.assertEqual(record["root_id"], "7000000000000000001")
+        self.assertEqual(record["parent_id"], "")  # "0" normalized to ""
+        profile = normalize_profile(douyin_comment_fork())
+        self.assertEqual(profile["account_id"], "dy-123")
+
+    def test_douyin_post_and_comment_same_author_aggregate(self):
+        records = [normalize(douyin_post_fork()), normalize(douyin_comment_fork())]
+        self.assertEqual(len({r["author_key"] for r in records}), 1)
+
+    def test_legacy_douyin_without_fork_fields_stays_anonymized(self):
+        # Upstream-original records (no author_id) must be byte-identical to
+        # the pre-WP2 behavior: anonymous key, masked nickname in record.
+        record = normalize(anon_row())
+        self.assertEqual(record["author_key"], "anonymous:abc")
+        self.assertEqual(record["identity_mode"], "upstream_anonymized")
+        self.assertEqual(record["author"], "示***例")
+        self.assertIsNone(normalize_profile(anon_row()))
+
+    def test_douyin_end_to_end_accounts_write(self):
+        # Full chain: raw fork rows -> run() -> accounts + content links.
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            source = root / "in.jsonl"
+            rows = [douyin_post_fork(), douyin_comment_fork(), anon_row()]
+            source.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+            db_path = root / "db.sqlite"
+            run(source, POLICY, db_path, root / "out", mode="rules")
+            db = connect(db_path)
+            accounts = db.execute("SELECT account_key,nickname,profile_url FROM accounts").fetchall()
+            self.assertEqual(len(accounts), 1)
+            self.assertEqual(accounts[0]["account_key"], "douyin:dy-123")
+            self.assertEqual(accounts[0]["nickname"], "抖音作者")
+            self.assertEqual(accounts[0]["profile_url"], "https://www.douyin.com/user/dy-123")
+            links = sorted(l["content_id"] for l in db.execute("SELECT content_id FROM account_content_links"))
+            self.assertEqual(links, ["7000000000000000001", "7000000000000000002"])
+            db.close()
+
+
 class PublicAccountNormalizationTests(unittest.TestCase):
+    def test_cross_platform_anonymous_hashes_never_share_group_key(self):
+        # P1 review item: anonymous:hash keys are NOT globally unique. The
+        # same hash on two platforms must produce two distinct display keys.
+        bili = normalize(anon_row(chash="abc"))
+        # A douyin comment already uses platform "douyin"; simulate the same
+        # hash reaching the view layer from a different platform context.
+        from content_screening.live_view import _person_key
+        self.assertEqual(_person_key({"platform": "douyin", "author_key": bili["author_key"], "id": "1"}),
+                         "douyin:anonymous:abc")
+        self.assertEqual(_person_key({"platform": "xhs", "author_key": bili["author_key"], "id": "2"}),
+                         "xhs:anonymous:abc")
+        self.assertNotEqual(_person_key({"platform": "douyin", "author_key": "anonymous:abc", "id": "1"}),
+                             _person_key({"platform": "xhs", "author_key": "anonymous:abc", "id": "2"}))
+
     def test_same_id_different_platforms_never_merge(self):
         bili = normalize(pub_row(platform="bilibili"))
         xhs = normalize(pub_row(platform="xhs", aid="42", nick="同名不同人"))
@@ -180,6 +272,48 @@ class AccountRepositoryTests(unittest.TestCase):
         db = self._db()
         self.assertEqual(db.execute("SELECT count(*) FROM accounts").fetchone()[0], 0)
         self.assertEqual(db.execute("SELECT count(*) FROM account_content_links").fetchone()[0], 0)
+
+    def test_text_change_repoints_content_link(self):
+        # P1: after a content edit produces a new source_hash, the account's
+        # content link must point at the LATEST version - account overviews
+        # and interest profiling always read current content.
+        self._import([pub_row(cid="p1", aid="42", text="开源Agent讨论，找搭子")])
+        db = self._db()
+        old_hash = db.execute(
+            "SELECT source_hash FROM account_content_links WHERE content_id='p1'").fetchone()["source_hash"]
+        self._import([pub_row(cid="p1", aid="42", text="完全不同的新正文，讲别的")])
+        rows = db.execute(
+            "SELECT source_hash FROM account_content_links WHERE content_id='p1'").fetchall()
+        self.assertEqual(len(rows), 1)  # one link, not duplicated
+        self.assertNotEqual(rows[0]["source_hash"], old_hash)  # repointed
+        latest = db.execute("SELECT source_hash FROM v2_sources WHERE source_json LIKE ?",
+                            ('%完全不同的新正文%',)).fetchone()
+        self.assertEqual(rows[0]["source_hash"], latest["source_hash"])  # points at current text
+        # The old v2_sources row survives for audit history.
+        self.assertIsNotNone(db.execute(
+            "SELECT source_hash FROM v2_sources WHERE source_hash=?", (old_hash,)).fetchone())
+
+    def test_account_content_link_and_profile_kept_on_partial_update(self):
+        # P2: a later batch missing the nickname/profile_url must never erase
+        # known values (missing != explicitly cleared).
+        self._import([pub_row(cid="p1", aid="42", nick="完整昵称")])
+        partial = pub_row(cid="p2", aid="42", nick="")
+        partial["data"]["author_profile_url"] = ""
+        self._import([partial])
+        db = self._db()
+        account = db.execute("SELECT nickname,profile_url FROM accounts WHERE account_key='bilibili:42'").fetchone()
+        self.assertEqual(account["nickname"], "完整昵称")  # kept, not overwritten with ""
+        self.assertEqual(account["profile_url"], "https://space.bilibili.com/42")
+
+    def test_active_days_are_calendar_dates(self):
+        # P2: same UTC date with different timestamps counts as ONE active day.
+        self._import([pub_row(cid="p1", aid="42", published="2026-10-30T01:00:00+00:00"),
+                      pub_row(cid="p2", aid="42", published="2026-10-30T15:00:00+00:00"),
+                      pub_row(cid="p3", aid="42", published="2026-10-31T09:00:00+00:00")])
+        db = self._db()
+        overview = account_overview(db, "bilibili:42")
+        self.assertEqual(overview["content_count"], 3)
+        self.assertEqual(overview["active_days"], 2)  # Oct 30 + Oct 31, not 3
 
     def test_overview_and_search(self):
         self._import([pub_row(cid="p1", aid="42"), pub_row(cid="p2", aid="42")])

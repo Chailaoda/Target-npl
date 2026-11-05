@@ -60,14 +60,26 @@ def normalize(row):
         root = text_id(source.get("aweme_id")) if kind == "comment" else ""
         parent = text_id(source.get("parent_comment_id")) if kind == "comment" else ""
         parent = "" if parent == "0" else parent
-        author_key = "anonymous:" + source["creator_hash"] if source.get("creator_hash") else ""
-        author, author_url = source.get("nickname", ""), ""
+        # Controlled fork (opt-in) passes public author fields through raw
+        # Douyin records too (author_id / author_nickname / author_profile_url).
+        # With a real author_id the record takes the public-account path even
+        # though the legacy anonymized fields (creator_hash / masked nickname)
+        # are still present; without it, behavior is byte-identical to before.
+        fork_author_id = text_id(source.get("author_id"))
+        if fork_author_id and not source.get("anonymized") is True:
+            author_key = f"{platform}:{fork_author_id}"
+            # Display profile never joins the semantic record (cache stability).
+            author, author_url = "", ""
+            identity_mode = "public_source"
+        else:
+            author_key = "anonymous:" + source["creator_hash"] if source.get("creator_hash") else ""
+            author, author_url = source.get("nickname", ""), ""
+            identity_mode = "upstream_anonymized"
         url = public_url(source.get("aweme_url", ""),platform) or (f"https://www.douyin.com/video/{root or cid}" if (root or cid).isdigit() else "")
         published_text = text_id(source.get("create_time"))
         published_at = ""
         if published_text.isdigit() and 0 < int(published_text) < 4_102_444_800:
             published_at = datetime.fromtimestamp(int(published_text), timezone.utc).isoformat()
-        identity_mode = "upstream_anonymized"
     else:
         cid = text_id(source.get("content_id"))
         text = source.get("text")
@@ -120,11 +132,18 @@ def normalize_profile(row):
         raise ValueError("Invalid upstream object")
     platform = row.get("platform", "douyin")
     account_id = text_id(source.get("author_id"))
-    if not account_id or source.get("anonymized") is True or "aweme_id" in source:
+    if not account_id or source.get("anonymized") is True:
         return None
+    # Legacy anonymized Douyin rows (aweme_id present, no fork author_id) have
+    # no public identity: no profile payload. Fork-enabled rows carry
+    # author_id even inside raw aweme records and DO get a profile.
+    nickname_raw = source.get("author_nickname", "")
+    if not nickname_raw and "aweme_id" not in source:
+        # New-format rows expose the full nickname under "author".
+        nickname_raw = source.get("author", "")
     return {"platform": platform, "account_id": account_id,
-            "nickname": source.get("author", "") if isinstance(source.get("author", ""), str) else "",
-            "profile_url": public_url(source.get("author_url", "") or source.get("author_profile_url", ""), platform),
+            "nickname": nickname_raw if isinstance(nickname_raw, str) else "",
+            "profile_url": public_url(source.get("author_profile_url", "") or source.get("author_url", ""), platform),
             "identity_source": "platform_public_content_api", "identity_mode": "public_source"}
 
 

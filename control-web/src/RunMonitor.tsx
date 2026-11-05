@@ -256,7 +256,9 @@ export default function RunMonitor({
     for (const item of live?.candidates || []) {
       const isExact = item.evidence_level === 'explicit' || (!item.evidence_level && (item.score || 0) >= 70)
       const isPotential = item.evidence_level === 'related_only' || (item.quality_flags || []).includes('tier_potential') || (!isExact && (item.score || 0) >= 50)
-      const key = item.author_key || `${item.platform}:${item.author || item.id}`
+      // Anonymous hashes are not globally unique across platforms - always
+      // namespace the person key with the platform before grouping (A03).
+      const key = `${item.platform}:${item.author_key}` || `${item.platform}:content:${item.id}`
       const existing = map.get(key)
       if (!existing) {
         map.set(key, { personKey: key, platform: item.platform, authorName: item.author?.trim() || '公开平台用户', authorUrl: item.author_url, highestScore: item.score || 0, isExact, isPotential, records: [item] })

@@ -72,7 +72,7 @@
 ## 6. 回滚方案
 
 1. **代码回滚**：`git checkout main`；功能分支保留不删，数据库 schema 变更可回滚（见下）。
-2. **数据库回滚**：WP3 迁移为纯增量 `CREATE TABLE IF NOT EXISTS` + `v2_sources` 增列 `semantic_hash`，提供 `scripts/db_migrate.py --rollback`：删除新增表、`DROP COLUMN semantic_hash`（SQLite 3.35+）。旧表旧列零改动，旧代码可立即在迁移后的库上运行（新列对其透明）。
+2. **数据库回滚**：WP3 迁移为纯增量 `CREATE TABLE IF NOT EXISTS`（六张新逻辑表，**不改动 v2_* 既有表结构**——缓存分离通过"语义记录与展示资料分离"在标准化层实现，无需增列），提供 `scripts/db_migrate.py --rollback`：仅删除新增六表，v2_* 数据零改动，旧代码可立即在迁移后的库上运行。
 3. **vendor 回滚**：受控版本在独立分支/worktree，运行时 `HEAD` 与 integrity check 不动；回滚即弃用新分支，无需任何操作。
 4. **数据回滚**：真实数据全部在 `data/backups/20261105-wp0/` 有冷备份；改造过程不修改任何历史记录行（新表只增、旧表 INSERT-only）。
 

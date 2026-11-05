@@ -88,8 +88,26 @@ def account_key(platform, account_id):
 
 
 def migrate(db):
-    """Idempotent forward migration (all CREATE IF NOT EXISTS, rollback-safe)."""
-    db.executescript(SCHEMA)
+    """Idempotent forward migration (all CREATE IF NOT EXISTS, rollback-safe).
+
+    Atomic: the schema is applied inside one explicit transaction, so an
+    interrupted migration either fully applies or leaves the database at the
+    previous schema — never a half-created state. (executescript() would
+    auto-commit per statement; we split on ';' and wrap in BEGIN/COMMIT.)
+    """
+    isolation = db.isolation_level
+    try:
+        db.isolation_level = None  # manual transaction control
+        db.execute("BEGIN")
+        for statement in SCHEMA.split(";"):
+            if statement.strip():
+                db.execute(statement)
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+    finally:
+        db.isolation_level = isolation
 
 
 @contextmanager
@@ -121,22 +139,35 @@ def upsert_account(db, profile, seen_at):
                        (key, nickname, profile_url, seen_at))
         else:
             # Profile refresh: never touches content analysis caches.
+            # Missing (empty) values from a new batch never erase known values:
+            # platform fields the API simply did not return this time are kept.
+            new_nick = nickname or row["nickname"]
+            new_url = profile_url or row["profile_url"]
             db.execute("UPDATE accounts SET nickname=?,profile_url=?,last_seen_at=? WHERE account_key=?",
-                       (nickname, profile_url, seen_at, key))
-            if (row["nickname"], row["profile_url"]) != (nickname, profile_url):
+                       (new_nick, new_url, seen_at, key))
+            if (row["nickname"], row["profile_url"]) != (new_nick, new_url):
                 db.execute("INSERT INTO account_profile_history(account_key,nickname,profile_url,observed_at) VALUES (?,?,?,?)",
-                           (key, nickname, profile_url, seen_at))
+                           (key, new_nick, new_url, seen_at))
     return key
 
 
 def link_content(db, key, record, source_hash, seen_at):
-    """Associate a normalized record with its author account (idempotent)."""
+    """Associate a normalized record with its author account (idempotent).
+
+    Content version policy: the row points at the CURRENT semantic version
+    (source_hash) of each (account, content). When an edit produces a new
+    source_hash the link is repointed, so account overviews and later
+    interest profiling always read the latest analyzed content — while the
+    older v2_sources rows stay intact for audit history.
+    """
     if not key:
         return
     with saving(db):
         db.execute("""INSERT INTO account_content_links(account_key,platform,object_type,content_id,source_hash,first_seen_at,last_seen_at)
             VALUES (?,?,?,?,?,?,?)
-            ON CONFLICT(account_key,platform,object_type,content_id) DO UPDATE SET last_seen_at=excluded.last_seen_at""",
+            ON CONFLICT(account_key,platform,object_type,content_id) DO UPDATE SET
+                source_hash=excluded.source_hash,
+                last_seen_at=excluded.last_seen_at""",
             (key, record["platform"], record["object_type"], record["content_id"], source_hash, seen_at, seen_at))
 
 
@@ -167,12 +198,17 @@ def account_overview(db, key):
     # Activity stats are derived from linked sources' JSON (published_at lives
     # inside v2_sources.source_json, not as a SQL column).
     content_count = db.execute("SELECT count(*) FROM account_content_links WHERE account_key=?", (key,)).fetchone()[0]
+    # Active days are distinct UTC calendar dates, not distinct raw timestamps
+    # (two posts at 09:00 and 15:00 the same day count as ONE active day).
     days = set()
     for link in db.execute("SELECT source_hash FROM account_content_links WHERE account_key=?", (key,)).fetchall():
         src = db.execute("SELECT source_json FROM v2_sources WHERE source_hash=?", (link["source_hash"],)).fetchone() if _has_column(db) else None
         if src:
             try:
-                days.add(json.loads(src["source_json"]).get("published_at", ""))
+                published = json.loads(src["source_json"]).get("published_at", "")
+                # ISO-8601 date part only: stable UTC calendar-day bucketing.
+                if isinstance(published, str) and len(published) >= 10:
+                    days.add(published[:10])
             except (ValueError, TypeError):
                 pass
     history = db.execute("SELECT nickname,profile_url,observed_at FROM account_profile_history WHERE account_key=? ORDER BY id", (key,)).fetchall()
