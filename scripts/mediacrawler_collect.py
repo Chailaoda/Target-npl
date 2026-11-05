@@ -19,6 +19,24 @@ from datetime import datetime, timezone
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:sys.path.insert(0,str(ROOT))
 PINNED_COMMIT = "68d9ef1c1da22eab75940dfd7cec259907006538"
+# Target NPL 受控 fork 分支（feature/public-account-profiles，WP1）。
+# 相对上游 68d9ef1 为纯增量公开账号字段透传，请求限制/登录控制不变。
+FORK_COMMIT = "c15e46b15f32e5257ae139f59390fa4efa42ecba"
+# 采集适配层声明兼容的受控依赖提交集合；完整 diff 校验保证运行树未被
+# 未记录地改动（禁止通过改白名单来掩盖变更，新版本必须显式登记并评审）。
+ALLOWED_UPSTREAM_COMMITS = (PINNED_COMMIT, FORK_COMMIT)
+# 公开账号字段透传开关：fork 提交下默认启用；上游原版不透传公开账号。
+def _public_accounts_flag():
+    return "1" if os.environ.get("TARGET_NPL_PUBLIC_ACCOUNTS", "auto") in ("1", "auto") else ""
+
+
+def verify_upstream(upstream, expected=None):
+    """检查 vendor 目录 HEAD 在兼容提交白名单内且工作树干净。"""
+    sha = subprocess.check_output(["git", "-C", str(upstream), "rev-parse", "HEAD"], text=True).strip()
+    allowed = ALLOWED_UPSTREAM_COMMITS if expected is None else (expected,)
+    if sha not in allowed or subprocess.check_output(["git", "-C", str(upstream), "diff", "--name-only"], text=True).strip():
+        raise ValueError("Pinned upstream changed; review adapter compatibility first")
+    return sha
 
 
 def publish_result(result, receipt=None):
@@ -183,7 +201,7 @@ async def collect(settings, job, resume=False):
     state = json.loads(checkpoint.read_text(encoding="utf-8")) if resume else {"status": "running", "adapter_version": "1", "upstream_commit": PINNED_COMMIT, "settings": settings, "pages_completed": [], "comments_done": [], "records": 0,
              "posts": 0, "comments": 0, "requests": 0, "errors": [], "proxy_mode": "direct", "cookies_exported": False,
              "identity_mode": "upstream_anonymized", "raw_file": str(raw_path), "created_at_utc": datetime.now(timezone.utc).isoformat()}
-    if state["settings"] != settings or state["upstream_commit"] != PINNED_COMMIT or state.get("adapter_version") != "1":
+    if state["settings"] != settings or state["upstream_commit"] not in ALLOWED_UPSTREAM_COMMITS or state.get("adapter_version") != "1":
         raise ValueError("Collection resume configuration/version mismatch")
     state.update(status="running", errors=[])
     state.pop("finished_at_utc", None)
@@ -356,9 +374,9 @@ def main():
         if not receipt.is_relative_to(ROOT / "output") or receipt.exists():
             raise ValueError("Invalid/existing receipt path")
     upstream = ROOT / "vendor/MediaCrawler"
-    sha = subprocess.check_output(["git", "-C", str(upstream), "rev-parse", "HEAD"], text=True).strip()
-    if sha != PINNED_COMMIT or subprocess.check_output(["git", "-C", str(upstream), "diff", "--name-only"], text=True).strip():
-        raise ValueError("Pinned upstream changed; review adapter compatibility first")
+    sha = verify_upstream(upstream)
+    # 采集子进程内启用公开账号字段透传（仅受控 fork 支持；上游原版忽略此开关）。
+    os.environ["TARGET_NPL_PUBLIC_ACCOUNTS"] = "1" if sha == FORK_COMMIT else ""
     job_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     job = Path(args.resume_job).resolve() if args.resume_job else ROOT / "data/collections" / job_id
     if not job.is_relative_to(ROOT / "data/collections") or job == ROOT / "data/collections":

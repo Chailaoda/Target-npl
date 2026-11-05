@@ -19,7 +19,7 @@ sys.path.insert(0,str(ROOT))
 from content_screening.platforms import PLATFORMS
 from content_screening.platform_adapter import attach_store,disable_request_retries,search,post_id,detail,comments,detail_id
 from content_screening.platform_projection import project
-from scripts.mediacrawler_collect import load_settings,ensure_browser,publish_result,release_browser,NEEDS_USER_CODES,PINNED_COMMIT
+from scripts.mediacrawler_collect import load_settings,ensure_browser,publish_result,release_browser,NEEDS_USER_CODES,PINNED_COMMIT,ALLOWED_UPSTREAM_COMMITS,FORK_COMMIT,verify_upstream
 from content_screening import browser_window
 from content_screening.task_service import atomic_json
 
@@ -53,9 +53,11 @@ class RequestGate:
 async def collect(settings,job,progress=None):
     platform=settings['platform'];spec=PLATFORMS[platform]
     raw=job/'raw.jsonl';raw.touch(exist_ok=False)
-    state={'status':'running','platform':platform,'settings':settings,'adapter_version':'multi-1','upstream_commit':PINNED_COMMIT,
+    upstream_sha=os.environ.get('TARGET_NPL_UPSTREAM_SHA','')
+    identity='public_source' if os.environ.get('TARGET_NPL_PUBLIC_ACCOUNTS')=='1' and upstream_sha==FORK_COMMIT else 'upstream_anonymized'
+    state={'status':'running','platform':platform,'settings':settings,'adapter_version':'multi-1','upstream_commit':upstream_sha or PINNED_COMMIT,
         'records':0,'posts':0,'comments':0,'requests':0,'errors':[],'pages_completed':[],'raw_file':str(raw),'proxy_mode':'direct',
-        'identity_mode':'upstream_anonymized','cookies_exported':False,'created_at_utc':datetime.now(timezone.utc).isoformat()}
+        'identity_mode':identity,'cookies_exported':False,'created_at_utc':datetime.now(timezone.utc).isoformat()}
     def save():atomic_json(job/'checkpoint.json',state)
     save()
     if progress:atomic_json(progress,{'dataset_id':job.name})
@@ -146,7 +148,9 @@ def main():
     if progress and (not progress.is_relative_to(ROOT/'data/task-runs') or progress.name!='collection-progress.json'):raise ValueError('Invalid progress path')
     import subprocess
     upstream=ROOT/'vendor/MediaCrawler'
-    if subprocess.check_output(['git','-C',str(upstream),'rev-parse','HEAD'],text=True).strip()!=PINNED_COMMIT or subprocess.check_output(['git','-C',str(upstream),'diff','--name-only'],text=True).strip():raise ValueError('Pinned upstream changed')
+    sha=verify_upstream(upstream)
+    os.environ['TARGET_NPL_PUBLIC_ACCOUNTS']='1' if sha==FORK_COMMIT else ''
+    os.environ['TARGET_NPL_UPSTREAM_SHA']=sha
     job=ROOT/'data/collections'/datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ');job.mkdir(parents=True,exist_ok=False)
     sys.path.insert(0,str(upstream));os.chdir(upstream)
     try:state=asyncio.run(asyncio.wait_for(collect(settings,job,progress),timeout=settings['timeout_seconds']))
