@@ -19,7 +19,8 @@ sys.path.insert(0,str(ROOT))
 from content_screening.platforms import PLATFORMS
 from content_screening.platform_adapter import attach_store,disable_request_retries,search,post_id,detail,comments,detail_id
 from content_screening.platform_projection import project
-from scripts.mediacrawler_collect import load_settings,ensure_browser,publish_result,release_browser,NEEDS_USER_CODES,PINNED_COMMIT,ALLOWED_UPSTREAM_COMMITS,FORK_COMMIT,verify_upstream
+from scripts.mediacrawler_collect import load_settings,ensure_browser,publish_result,release_browser,NEEDS_USER_CODES,PINNED_COMMIT,ALLOWED_UPSTREAM_COMMITS,FORK_COMMIT
+from content_screening.vendor_env import resolve_vendor_env,VendorEnvironmentError
 from content_screening import browser_window
 from content_screening.task_service import atomic_json
 
@@ -146,13 +147,17 @@ def main():
     if not receipt.is_relative_to(ROOT/'output') or receipt.exists():raise ValueError('Invalid receipt')
     progress=Path(args.progress_file).resolve() if args.progress_file else None
     if progress and (not progress.is_relative_to(ROOT/'data/task-runs') or progress.name!='collection-progress.json'):raise ValueError('Invalid progress path')
-    import subprocess
-    upstream=ROOT/'vendor/MediaCrawler'
-    sha=verify_upstream(upstream)
-    # 同 mediacrawler_collect.py：显式 0 强制关闭；默认 auto 时受控 fork 自动开启。
-    override=os.environ.get('TARGET_NPL_PUBLIC_ACCOUNTS')
-    os.environ['TARGET_NPL_PUBLIC_ACCOUNTS']='' if override=='0' else ('1' if sha==FORK_COMMIT else '')
-    os.environ['TARGET_NPL_UPSTREAM_SHA']=sha
+    # 与调度器 / 抖音入口共用同一依赖解析：导入的源码树、git 完整性校验
+    # 工作树、调度器选中的解释器必为同一目录（TARGET_NPL_VENDOR_DIR 锁定）。
+    # 检测到 fork 只证明具备透传能力，不替代平台访问权限与授权登录态确认。
+    try:
+        vendor=resolve_vendor_env(ROOT,env=os.environ)
+    except VendorEnvironmentError as error:
+        print(f'[VENDOR_ENV_ERROR] {error}',file=sys.stderr)
+        return 3
+    upstream=vendor.source_dir
+    sha=vendor.sha
+    os.environ.update(vendor.overrides())
     job=ROOT/'data/collections'/datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ');job.mkdir(parents=True,exist_ok=False)
     sys.path.insert(0,str(upstream));os.chdir(upstream)
     try:state=asyncio.run(asyncio.wait_for(collect(settings,job,progress),timeout=settings['timeout_seconds']))

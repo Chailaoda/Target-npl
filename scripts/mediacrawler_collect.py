@@ -18,35 +18,21 @@ from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:sys.path.insert(0,str(ROOT))
-PINNED_COMMIT = "68d9ef1c1da22eab75940dfd7cec259907006538"
-# Target NPL 受控 fork 分支（feature/public-account-profiles，WP1）。
-# 相对上游 68d9ef1 为纯增量公开账号字段透传，请求限制/登录控制不变。
-FORK_COMMIT = "c15e46b15f32e5257ae139f59390fa4efa42ecba"
-# 采集适配层声明兼容的受控依赖提交集合；完整 diff 校验保证运行树未被
-# 未记录地改动（禁止通过改白名单来掩盖变更，新版本必须显式登记并评审）。
-ALLOWED_UPSTREAM_COMMITS = (PINNED_COMMIT, FORK_COMMIT)
-# 公开账号字段透传开关：fork 提交下默认启用；上游原版不透传公开账号。
-def _public_accounts_flag():
-    return "1" if os.environ.get("TARGET_NPL_PUBLIC_ACCOUNTS", "auto") in ("1", "auto") else ""
+# 提交白名单、本地安装目录与解释器路径的唯一真源是 third_party/mediacrawler.json；
+# 三个采集入口统一经 vendor_env.resolve_vendor_env() 解析，此处不再硬编码
+# vendor 路径或自行推导透传开关。
+from content_screening.vendor_env import (  # noqa: E402 - ROOT must be on sys.path first
+    load_registry, resolve_vendor_env, verify_worktree, VendorEnvironmentError,
+    ENV_SHA, is_pycache_entry as _is_pycache_impl)
+_REGISTRY = load_registry(ROOT)
+PINNED_COMMIT = _REGISTRY["commit"]
+FORK_COMMIT = _REGISTRY["controlled_fork"]["commit"]
+ALLOWED_UPSTREAM_COMMITS = tuple(_REGISTRY["compatibility"]["allowed_commits"])
 
 
 def _is_pycache_entry(status_line):
-    """True only for a real Python bytecode cache FILE inside a __pycache__ dir.
-
-    Matching by path COMPONENTS + strict parent directory + filename suffix
-    prevents disguised names ("__pycache__-notes.md", "evil__pycache__.py")
-    and arbitrary files planted inside a cache directory from being tolerated.
-    Only *.pyc / *.pyo directly under a __pycache__ component are allowed.
-    """
-    from pathlib import PurePosixPath
-    raw = status_line[3:].strip()
-    if raw.startswith('"') and raw.endswith('"'):
-        raw = raw[1:-1]
-    # git quotes non-ascii/special chars with C-style escapes
-    raw = raw.encode().decode("unicode_escape") if "\\u" in raw or "\\x" in raw else raw
-    parts = PurePosixPath(raw.replace("\\\\", "\\")).parts
-    return len(parts) >= 2 and parts[-2] == "__pycache__" \
-        and parts[-1].endswith((".pyc", ".pyo"))
+    """Compatibility wrapper; the single implementation lives in vendor_env."""
+    return _is_pycache_impl(status_line)
 
 
 def verify_upstream(upstream, expected=None):
@@ -57,17 +43,12 @@ def verify_upstream(upstream, expected=None):
     唯一允许的例外是位于 __pycache__ 目录内的 Python 运行时产物
     （按路径组成部分精确判断，文件名伪装不算）。
     """
-    sha = subprocess.check_output(["git", "-C", str(upstream), "rev-parse", "HEAD"], text=True).strip()
-    allowed = ALLOWED_UPSTREAM_COMMITS if expected is None else (expected,)
-    if sha not in allowed:
-        raise ValueError("Pinned upstream changed; review adapter compatibility first")
-    status = subprocess.check_output(
-        ["git", "-C", str(upstream), "status", "--porcelain", "--untracked-files=all"],
-        text=True).splitlines()
-    dirty = [line for line in status if line and not _is_pycache_entry(line)]
-    if dirty:
-        raise ValueError("Pinned upstream working tree is dirty; review adapter compatibility first")
-    return sha
+    # Delegated to the shared implementation used by resolve_vendor_env(), so
+    # the scheduler, this adapter and platform_collect.py verify the SAME tree
+    # with the SAME rules. run= is injectable for offline tests.
+    return verify_worktree(upstream, expected=expected,
+                           allowed=ALLOWED_UPSTREAM_COMMITS,
+                           run=subprocess.check_output)
 
 
 def publish_result(result, receipt=None):
@@ -229,7 +210,9 @@ async def collect(settings, job, resume=False):
     raw_path = job / "raw.jsonl"
     if not resume:
         raw_path.touch(exist_ok=False)
-    state = json.loads(checkpoint.read_text(encoding="utf-8")) if resume else {"status": "running", "adapter_version": "1", "upstream_commit": PINNED_COMMIT, "settings": settings, "pages_completed": [], "comments_done": [], "records": 0,
+    # 记录本次实际选中的依赖提交（由 main 经 vendor_env 注入），而不是写死
+    # 上游基线；resume 校验仍沿用同一白名单。直接单元调用时回退到基线值。
+    state = json.loads(checkpoint.read_text(encoding="utf-8")) if resume else {"status": "running", "adapter_version": "1", "upstream_commit": os.environ.get(ENV_SHA) or PINNED_COMMIT, "settings": settings, "pages_completed": [], "comments_done": [], "records": 0,
              "posts": 0, "comments": 0, "requests": 0, "errors": [], "proxy_mode": "direct", "cookies_exported": False,
              "identity_mode": "upstream_anonymized", "raw_file": str(raw_path), "created_at_utc": datetime.now(timezone.utc).isoformat()}
     if state["settings"] != settings or state["upstream_commit"] not in ALLOWED_UPSTREAM_COMMITS or state.get("adapter_version") != "1":
@@ -404,18 +387,19 @@ def main():
         receipt = Path(args.receipt).resolve()
         if not receipt.is_relative_to(ROOT / "output") or receipt.exists():
             raise ValueError("Invalid/existing receipt path")
-    upstream = ROOT / "vendor/MediaCrawler"
-    sha = verify_upstream(upstream)
-    # 公开账号字段透传的启用条件（三层，评审要求明确化）：
-    # 1) 外部显式设置 TARGET_NPL_PUBLIC_ACCOUNTS=0 -> 强制关闭（尊重操作者意愿）
-    # 2) 外部显式设置 =1 -> 开启（且仅当运行的是受控 fork 时实际生效）
-    # 3) 未设置（默认 auto）-> 检测到受控 fork 提交时自动开启，上游原版保持关闭
-    # 依据：third_party/mediacrawler.json 中登记的字段授权范围仅覆盖受控 fork。
-    override = os.environ.get("TARGET_NPL_PUBLIC_ACCOUNTS")
-    if override == "0":
-        os.environ["TARGET_NPL_PUBLIC_ACCOUNTS"] = ""
-    else:
-        os.environ["TARGET_NPL_PUBLIC_ACCOUNTS"] = "1" if sha == FORK_COMMIT else ""
+    # 统一依赖解析：本进程导入的源码树、git 完整性校验工作树，与调度器
+    # 选择的 Python 解释器必须是同一个目录。调度器用 TARGET_NPL_VENDOR_DIR
+    # 锁定该目录，子进程不得自行回退到另一个版本。
+    # 检测到 fork 仅证明具备公开字段透传能力，不替代平台访问权限、
+    # 操作者授权与登录态的人工确认。
+    try:
+        vendor = resolve_vendor_env(ROOT, env=os.environ)
+    except VendorEnvironmentError as error:
+        print(f"[VENDOR_ENV_ERROR] {error}", file=sys.stderr)
+        return 3
+    upstream = vendor.source_dir
+    sha = vendor.sha
+    os.environ.update(vendor.overrides())
     job_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     job = Path(args.resume_job).resolve() if args.resume_job else ROOT / "data/collections" / job_id
     if not job.is_relative_to(ROOT / "data/collections") or job == ROOT / "data/collections":

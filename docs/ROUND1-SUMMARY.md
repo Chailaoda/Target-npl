@@ -55,6 +55,14 @@
 
 **其他 P2** — `__pycache__` 完整性例外收紧为「直接位于 `__pycache__` 目录下且扩展名为 `.pyc`/`.pyo`」的字节码文件；任意植入文件与伪装路径一律拒绝。
 
+## 第五轮：公开账号采集启动链路统一（离线修复）
+
+- 新增 `content_screening/vendor_env.py`：`third_party/mediacrawler.json` 是安装目录与提交白名单的唯一真源；任务调度器、抖音采集、多平台采集三个入口统一调用 `resolve_vendor_env()`，**调度器选中的解释器、被导入的 MediaCrawler 源码、git 完整性校验工作树必为同一目录**。调度器用 `TARGET_NPL_VENDOR_DIR` 把该目录锁定后传给子进程，子进程不得自行换版本。
+- 上游基线 `vendor/MediaCrawler`（`68d9ef1`）保持不动；受控 fork `c15e46b` 独立安装到 `vendor/MediaCrawler-controlled`（声明拒绝两者同路径）。干净机器按 README 的 A/B 两步即可完成安装与运行。
+- 运行模式：上游 + 匿名允许；上游 + 明确要求公开账号 → 采集前报 `PUBLIC_ACCOUNTS_REQUIRE_CONTROLLED_FORK`，**不静默降级**；fork + 公开账号 → 按声明字段范围启用透传；显式 `=0` → 保持匿名；提交不在白名单 / 工作树异常 / 解释器缺失 / 未安装 → 采集前 `VENDOR_*` 明确错误。
+- `python -m content_screening.vendor_env --preflight` 为纯离线自检：不登录、不采集、不发起网络请求。**检测到 fork 只证明运行版本具备透传能力，不替代平台访问权限、操作者授权与登录态的人工确认。**
+- 新增 15 项离线回归测试（`tests/test_vendor_env.py`）：真实任务启动命令与子进程环境、五类模式、依赖缺失阻断、选中 commit 与声明一致、零在线请求。全量 Python 131/131、前端 13/13、`tsc --noEmit` 与 `npm run build` 通过。
+
 ## 未解决事项（后续轮次）
 
 - WP4 兴趣画像模块（`interest_*` 四表已建好，逻辑未实现）

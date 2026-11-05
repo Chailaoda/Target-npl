@@ -11,11 +11,28 @@ from content_screening.platforms import PLATFORMS,catalog,selected
 from content_screening.platform_projection import project,timestamp
 from content_screening.normalization import normalize,public_url
 from content_screening.multi_collection import collect_selected
+from content_screening.vendor_env import VendorEnvironment,load_registry
 from content_screening.task_service import atomic_json,TaskService
 from content_screening.control_server import RuleStore
 from scripts.mediacrawler_collect import validate_settings,validate_session
 
 ROOT=Path(__file__).resolve().parents[1]
+
+
+def stub_vendor(root):
+    """Scheduler preflight now resolves a real vendor environment before any
+    child starts. These tests exercise budget/merge logic with a mocked
+    subprocess, so inject a resolved baseline environment instead of doing
+    filesystem/git checks against the temporary data root. The real resolver
+    is covered end-to-end in tests/test_vendor_env.py.
+    """
+    python=root/'vendor/MediaCrawler/.venv/Scripts/python.exe'
+    python.parent.mkdir(parents=True,exist_ok=True)
+    python.touch()
+    decl=load_registry(ROOT)
+    source=root/'vendor/MediaCrawler'
+    return VendorEnvironment(root=root,source_dir=source,python=python,
+        sha=decl['commit'],kind='upstream',public_accounts=False,flag='',declaration=decl)
 
 
 class PlatformTests(unittest.TestCase):
@@ -64,7 +81,8 @@ class PlatformTests(unittest.TestCase):
             state={'status':'completed','records':len(rows),'posts':len(rows),'comments':0,'requests':2,'raw_file':str(raw),'settings':value}
             atomic_json(folder/'checkpoint.json',state);atomic_json(Path(command[command.index('--receipt')+1]),state)
             return subprocess.CompletedProcess(command,0)
-        with patch('content_screening.multi_collection.subprocess.run',side_effect=child):result=collect_selected(settings,self.folder,self.root)
+        with patch('content_screening.multi_collection.resolve_vendor_env',return_value=stub_vendor(self.root)), \
+             patch('content_screening.multi_collection.subprocess.run',side_effect=child):result=collect_selected(settings,self.folder,self.root)
         self.assertEqual(result['status'],'completed');self.assertEqual(result['posts'],3)
         self.assertLessEqual(sum(v['max_posts'] for v in limits),3)
         self.assertTrue(all(v['proxy_mode']=='direct' for v in limits));self.assertEqual(result['requests'],4)
@@ -83,7 +101,8 @@ class PlatformTests(unittest.TestCase):
             raw=folder/'raw.jsonl';raw.touch();state={'status':'needs_user_login','records':0,'posts':0,'comments':0,'requests':0,'raw_file':str(raw)}
             atomic_json(folder/'checkpoint.json',state);atomic_json(Path(command[command.index('--receipt')+1]),state)
             return subprocess.CompletedProcess(command,2)
-        with patch('content_screening.multi_collection.subprocess.run',side_effect=child):result=collect_selected(settings,self.folder,self.root)
+        with patch('content_screening.multi_collection.resolve_vendor_env',return_value=stub_vendor(self.root)), \
+             patch('content_screening.multi_collection.subprocess.run',side_effect=child):result=collect_selected(settings,self.folder,self.root)
         self.assertEqual(result['status'],'needs_user_login');self.assertEqual(result['requests'],0)
         self.assertEqual(len(result['platform_statuses']),2)
 

@@ -10,16 +10,32 @@
     "commit": "c15e46b15f32e5257ae139f59390fa4efa42ecba",
     "base_commit": "68d9ef1c1da22eab75940dfd7cec259907006538",
     "upstream_base_commit": "68d9ef1c1da22eab75940dfd7cec259907006538",
+    "local_path": "vendor/MediaCrawler-controlled",
+    "required_for_public_account_fields": true,
     "purpose": "Opt-in passthrough of public author fields (author_id, full nickname, public profile URL) returned by platform public content APIs. creator_hash/mask_nickname outputs unchanged; no request-limit, login or anti-bypass changes.",
     "license": "NON-COMMERCIAL LEARNING LICENSE 1.1",
-    "verify": "git clone https://github.com/Chailaoda/MediaCrawler-target-npl.git -b target-npl/public-account-fields && git rev-parse HEAD",
-    "record": "Fork history retains the full upstream lineage (830 commits up to 68d9ef1) plus 2 controlled commits; fetchable from any clean machine. The fork repository also serves as the canonical source so builds never depend on a developer's local worktree (dev worktree at vendor/mediacrawler-fork is a convenience only)."
+    "verify": "git clone -b target-npl/public-account-fields https://github.com/Chailaoda/MediaCrawler-target-npl.git vendor/MediaCrawler-controlled && git -C vendor/MediaCrawler-controlled rev-parse HEAD",
+    "record": "Fork history retains the full upstream lineage (830 commits up to 68d9ef1) plus 2 controlled commits; fetchable from any clean machine. The controlled fork is installed into its OWN directory so the pinned upstream baseline is never overwritten, and builds never depend on a developer's local worktree (dev worktree at vendor/mediacrawler-fork is a convenience only)."
+  },
+  "runtime": {
+    "resolved_by": "content_screening/vendor_env.py",
+    "entry_points": [
+      "content_screening/multi_collection.py",
+      "scripts/mediacrawler_collect.py",
+      "scripts/platform_collect.py"
+    ],
+    "python_relpath_windows": ".venv/Scripts/python.exe",
+    "python_relpath_posix": ".venv/bin/python",
+    "selection_lock_env": "TARGET_NPL_VENDOR_DIR",
+    "public_accounts_env": "TARGET_NPL_PUBLIC_ACCOUNTS",
+    "upstream_sha_env": "TARGET_NPL_UPSTREAM_SHA",
+    "note": "All three entry points call resolve_vendor_env(); the Python interpreter, the imported MediaCrawler source tree and the git worktree used by the integrity check are always the SAME directory. The scheduler passes TARGET_NPL_VENDOR_DIR to child processes so they cannot pick a different dependency. Detecting the fork proves passthrough capability only - it does NOT replace manual confirmation of platform access permission, operator authorisation or login state."
   },
   "compatibility": {
     "allowed_commits": [
       "68d9ef1c1da22eab75940dfd7cec259907006538",
       "c15e46b15f32e5257ae139f59390fa4efa42ecba"
     ],
-    "note": "Collection adapters accept either commit but require a clean working tree; adding new commits requires updating ALLOWED_UPSTREAM_COMMITS and this registry together."
+    "note": "Collection adapters accept either commit but require a clean working tree and an existing .venv interpreter in the selected directory. Adding new commits requires updating this registry and re-reviewing adapter compatibility together; resolve_vendor_env() refuses any other commit before collection starts. Public-account tasks require the controlled fork commit and never fall back to the upstream baseline."
   }
 }

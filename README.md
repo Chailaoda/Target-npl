@@ -22,14 +22,46 @@ Web 服务仅监听本机。任务会保存不可变版本；人工锁定字段�
 
 ## MediaCrawler 依赖
 
-MediaCrawler 源码不重复收录，也不上传它的虚拟环境、浏览器缓存、Cookie 或数据。适配器使用的上游地址与固定提交记录在 [third_party/mediacrawler.json](third_party/mediacrawler.json)。
+MediaCrawler 源码不重复收录，也不上传它的虚拟环境、浏览器缓存、Cookie 或数据。上游地址、固定提交、受控 fork 与**本地安装目录**全部登记在 [third_party/mediacrawler.json](third_party/mediacrawler.json)。三个采集入口（任务调度器 `content_screening/multi_collection.py`、抖音适配器 `scripts/mediacrawler_collect.py`、多平台适配器 `scripts/platform_collect.py`）统一通过 `content_screening/vendor_env.py` 解析依赖，**不在代码里硬编码路径**。
+
+上游基线与受控 fork 必须安装在**两个独立目录**；fork 不得覆盖已固定的上游检出。
+
+### A. 上游基线（匿名采集，默认）
 
 ```powershell
 git clone https://github.com/NanmiCoder/MediaCrawler.git vendor/MediaCrawler
 git -C vendor/MediaCrawler checkout 68d9ef1c1da22eab75940dfd7cec259907006538
+python -m venv vendor/MediaCrawler/.venv
+vendor/MediaCrawler/.venv/Scripts/python.exe -m pip install -r vendor/MediaCrawler/requirements.txt
 ```
 
-然后按照该固定版本的上游说明，在 `vendor/MediaCrawler/.venv` 安装独立 Python 环境和依赖。适配器使用 Windows 的 `.venv/Scripts/python.exe` 路径。平台登录由使用者本人在项目专用浏览器中完成；不要导入其他应用的登录资料。
+### B. 受控 fork（公开账号字段，需先确认授权范围）
+
+```powershell
+git clone -b target-npl/public-account-fields https://github.com/Chailaoda/MediaCrawler-target-npl.git vendor/MediaCrawler-controlled
+git -C vendor/MediaCrawler-controlled rev-parse HEAD
+python -m venv vendor/MediaCrawler-controlled/.venv
+vendor/MediaCrawler-controlled/.venv/Scripts/python.exe -m pip install -r vendor/MediaCrawler-controlled/requirements.txt
+```
+
+`rev-parse HEAD` 应为 `c15e46b15f32e5257ae139f59390fa4efa42ecba`。Linux/macOS 的解释器路径为 `<目录>/.venv/bin/python`，由声明自动选择（也可在声明的 `runtime.python_relpath` 覆盖）。运行时会校验 HEAD 在白名单内、工作树干净、解释器存在，且**调度器选择的解释器、被导入的 MediaCrawler 源码、git 完整性校验的工作树三者必须是同一目录**；调度器用 `TARGET_NPL_VENDOR_DIR` 锁定该目录并传给子进程，子进程不得自行改用其他版本。
+
+### 运行模式与失败策略
+
+| 环境 | 结果 |
+| --- | --- |
+| 只装 A，`TARGET_NPL_PUBLIC_ACCOUNTS` 未设置或 `auto` | 原版上游 + 匿名采集，允许运行 |
+| 只装 A，`=1`（明确要求公开账号） | **采集前报错** `PUBLIC_ACCOUNTS_REQUIRE_CONTROLLED_FORK`，不静默降级 |
+| 装了 B，未设置 / `auto` / `=1` | 受控 fork + 按声明字段范围启用透传 |
+| 装了 B，`=0` | 显式关闭，保持匿名行为 |
+| 提交不在白名单 / 工作树异常 / `.venv` 缺失 | 采集前停止，返回 `VENDOR_*` 明确错误 |
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -m content_screening.vendor_env --preflight
+.\.venv\Scripts\python.exe -X utf8 -m content_screening.vendor_env --preflight --public-accounts
+```
+
+前置自检是纯离线的：只读本地文件与 git 元数据，不登录、不采集、不发起任何网络请求。**检测到 fork 只证明运行版本具备公开字段透传能力，不能替代对平台访问权限、操作者授权与登录态的确认**。在线采集前仍需人工确认平台允许相应自动化访问，并由使用者本人在项目专用浏览器完成登录；不要导入其他应用的登录资料。
 
 MediaCrawler 自带非商业学习许可证，使用范围以其许可证为准。前端随附的上游许可证保留在 `control-web/UPSTREAM-LICENSE` 和 `control-web/MEDIACRAWLER-LICENSE`，见 [第三方说明](THIRD_PARTY_NOTICES.md)。
 
