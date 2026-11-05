@@ -138,12 +138,25 @@ class AccountRepositoryTests(unittest.TestCase):
         links = db.execute("SELECT content_id FROM account_content_links").fetchall()
         self.assertEqual(sorted(l["content_id"] for l in links), ["p1", "p2"])
 
+    def test_text_change_triggers_reanalysis(self):
+        # Inverse of the rename test: when the actual content text changes the
+        # semantic fingerprint must change, so a NEW analysis row is produced.
+        # Otherwise the cache optimization would serve stale results.
+        self._import([pub_row(cid="p1", aid="42", text="开源Agent讨论，找搭子")])
+        self._import([pub_row(cid="p1", aid="42", text="完全不同的正文，讲的是别的话题")])
+        db = self._db()
+        sources = db.execute("SELECT count(*) FROM v2_sources").fetchone()[0]
+        self.assertEqual(sources, 2)  # two distinct semantic records
+        analyses = db.execute("SELECT count(*) FROM v2_analyses").fetchone()[0]
+        self.assertEqual(analyses, 2)  # both were analyzed, no stale reuse
+        accounts = db.execute("SELECT account_key FROM accounts").fetchall()
+        self.assertEqual(len(accounts), 1)  # same account either way
+
     def test_rename_updates_account_without_reanalysis(self):
         self._import([pub_row(cid="p1", aid="42", nick="旧名字")])
         db = self._db()
         before = (db.execute("SELECT count(*) FROM v2_sources").fetchone()[0],
-                  db.execute("SELECT count(*) FROM v2_analyses").fetchone()[0],
-                  sorted(r[0] for r in db.execute("SELECT source_hash FROM v2_sources")))
+                  db.execute("SELECT count(*) FROM v2_analyses").fetchone()[0],                  sorted(r[0] for r in db.execute("SELECT source_hash FROM v2_sources")))
         self._import([pub_row(cid="p1", aid="42", nick="新名字")])
         after = (db.execute("SELECT count(*) FROM v2_sources").fetchone()[0],
                  db.execute("SELECT count(*) FROM v2_analyses").fetchone()[0],
@@ -195,6 +208,41 @@ class MigrationTests(unittest.TestCase):
                 tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 self.assertIn("accounts", tables)
                 self.assertIn("interest_profiles", tables)
+
+    def test_interrupted_migration_recovers_and_keeps_data(self):
+        # P1: a half-created schema (migration interrupted midway) must be
+        # repairable by re-running the migration, and existing v2_* rows must
+        # survive untouched.
+        import subprocess
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            db_path = Path(tmp) / "db.sqlite"
+            # Build a partially migrated database: full migration first, then
+            # rollback, then simulate a crash by dropping only one table.
+            sqlite3.connect(db_path).close()
+            def migrate(*extra):
+                return subprocess.run([sys.executable, "scripts/db_migrate.py",
+                                       "--db", str(db_path), *extra],
+                                      capture_output=True, text=True)
+            self.assertIn("迁移完成", migrate().stdout)
+            # Seed a row in a migrated table, then simulate an interrupted
+            # migration where a later table is missing.
+            with closing(sqlite3.connect(db_path)) as db:
+                db.execute("INSERT INTO accounts VALUES (?,?,?,?,?,?,?,?,?)",
+                           ("bilibili:42", "bilibili", "42", "UP主",
+                            "https://space.bilibili.com/42", "platform_public_content_api",
+                            "public_source", "2026-11-05T00:00:00+00:00",
+                            "2026-11-05T00:00:00+00:00"))
+                db.commit()
+            with closing(sqlite3.connect(db_path)) as db:
+                db.execute("DROP TABLE interest_evidence")
+                db.commit()
+            # Re-running the migration repairs the schema without harming data.
+            self.assertIn("迁移完成", migrate().stdout)
+            with closing(sqlite3.connect(db_path)) as db:
+                tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                self.assertIn("interest_evidence", tables)  # repaired
+                rows = db.execute("SELECT nickname FROM accounts").fetchall()
+                self.assertEqual([r[0] for r in rows], ["UP主"])  # untouched
 
 
 if __name__ == "__main__":

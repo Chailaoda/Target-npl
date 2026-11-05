@@ -15,12 +15,13 @@
 
 ## MediaCrawler 受控版本
 
-- fork 分支：`target-npl/public-account-fields`（worktree 位于 `vendor/mediacrawler-fork/`，git 仓库在 `vendor/MediaCrawler/.git`）
-- 基线上游：`68d9ef1`；fork HEAD 相对上游 92 行纯增量
+- **公开仓库：** `https://github.com/Chailaoda/MediaCrawler-target-npl`（分支 `target-npl/public-account-fields`，已验证干净机器可 clone 复现）
+- 基线上游：`68d9ef1`；fork HEAD `c15e46b`，保留完整上游历史（830 提交）+ 2 个受控提交，相对基线 92 行纯增量
 - 透传开关：环境变量 `TARGET_NPL_PUBLIC_ACCOUNTS=1`（默认关闭，关闭时 `creator_hash`/`mask_nickname` 输出与上游逐字节一致）
 - 7 平台透传字段：`author_id`、`author_nickname`、`author_profile_url`（均来自平台公开内容接口本身，不发额外主页请求）
-- 依赖声明：`third_party/mediacrawler.json` 登记 fork 提交；采集脚本校验改为「允许提交集合 ∈ 白名单 + 工作树必须干净」
+- 依赖声明：`third_party/mediacrawler.json` 登记 fork 远程 URL 与提交；采集脚本校验改为「允许提交集合 ∈ 白名单 + 工作树必须干净」
 - 许可证：上游 NON-COMMERCIAL LEARNING LICENSE 1.1 保持不变
+- 本地开发 worktree（`vendor/mediacrawler-fork/`）仅为便利，构建不再依赖它
 
 ## 关键设计决策
 
@@ -32,9 +33,10 @@
 
 ## 验证结果
 
-- 全量测试 91/91 通过（77 既有 + 14 新增 `tests/test_public_accounts.py`）
-- 新增回归覆盖：同 ID 不同平台不合并、同昵称不同 ID 不合并、昵称/URL 更新不触发重分析、账号 ID 缺失标记 unknown、旧匿名数据导入兼容、重复采集不重复累计、A07 按平台校验来源链接、迁移回滚重放
+- 全量测试 93/93 通过（77 既有 + 16 新增 `tests/test_public_accounts.py`）
+- 新增回归覆盖：同 ID 不同平台不合并、同昵称不同 ID 不合并、昵称/URL 更新不触发重分析、**正文变化必须触发重分析（反向缓存测试）**、账号 ID 缺失标记 unknown、旧匿名数据导入兼容、重复采集不重复累计、A07 按平台校验来源链接、迁移回滚重放、**迁移中断后重放可修复且不破坏既有数据**
 - fork 离线验证：7 平台 × 开关两态（关闭=零公开字段；打开=ID/昵称/主页 URL 完整透传）
+- fork 可复现性：干净机器 `git clone https://github.com/Chailaoda/MediaCrawler-target-npl.git -b target-npl/public-account-fields` → HEAD=`c15e46b`，与上游 `68d9ef1` 的 diff 为声明的 92 行增量
 - 端到端链路（fork store → project → normalize）：B站账号 `bilibili:42` 作品+评论正确归属同一账号，xsec_token 不入结果
 - 真实数据库副本迁移：缓存零失效、回滚→再迁移数据一致
 

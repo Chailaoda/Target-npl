@@ -5,12 +5,15 @@
   "source_included": false,
   "license": "NON-COMMERCIAL LEARNING LICENSE 1.1",
   "controlled_fork": {
+    "repository": "https://github.com/Chailaoda/MediaCrawler-target-npl.git",
     "branch": "target-npl/public-account-fields",
     "commit": "c15e46b15f32e5257ae139f59390fa4efa42ecba",
     "base_commit": "68d9ef1c1da22eab75940dfd7cec259907006538",
+    "upstream_base_commit": "68d9ef1c1da22eab75940dfd7cec259907006538",
     "purpose": "Opt-in passthrough of public author fields (author_id, full nickname, public profile URL) returned by platform public content APIs. creator_hash/mask_nickname outputs unchanged; no request-limit, login or anti-bypass changes.",
     "license": "NON-COMMERCIAL LEARNING LICENSE 1.1",
-    "record": "Feature branch maintained locally inside the vendor/MediaCrawler git repository (dev worktree at vendor/mediacrawler-fork); fork source is NOT redistributed inside this repository."
+    "verify": "git clone https://github.com/Chailaoda/MediaCrawler-target-npl.git -b target-npl/public-account-fields && git rev-parse HEAD",
+    "record": "Fork history retains the full upstream lineage (830 commits up to 68d9ef1) plus 2 controlled commits; fetchable from any clean machine. The fork repository also serves as the canonical source so builds never depend on a developer's local worktree (dev worktree at vendor/mediacrawler-fork is a convenience only)."
   },
   "compatibility": {
     "allowed_commits": [
