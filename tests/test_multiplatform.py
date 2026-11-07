@@ -106,6 +106,68 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(result['status'],'needs_user_login');self.assertEqual(result['requests'],0)
         self.assertEqual(len(result['platform_statuses']),2)
 
+    def _run_platforms(self, outcomes):
+        """Drive collect_selected with mocked children; no network or login.
+
+        outcomes maps platform -> (child status, records, identity_mode).
+        """
+        names=list(outcomes)
+        settings=dict(self.settings,platforms=names,platform=names[0],
+                      max_posts=6,max_requests=30,timeout_seconds=60)
+        def child(command,**kwargs):
+            value=json.loads(Path(command[command.index('--config')+1]).read_text(encoding='utf-8'))
+            platform=value['platform'];index=names.index(platform)
+            folder=self.root/'data/collections'/('20261107T00000000000%dZ'%index)
+            folder.mkdir(parents=True,exist_ok=True)
+            raw=folder/'raw.jsonl';raw.touch()
+            status,records,mode=outcomes[platform]
+            rows=[{'platform':platform,'object_type':'post','data':{'content_id':str(i),'text':'公开原文'}} for i in range(records)]
+            if rows:raw.write_text(''.join(json.dumps(r)+'\n' for r in rows),encoding='utf-8')
+            state={'status':status,'records':records,'posts':records,'comments':0,'requests':2,
+                   'raw_file':str(raw),'settings':value,'identity_mode':mode}
+            atomic_json(Path(command[command.index('--receipt')+1]),state)
+            return subprocess.CompletedProcess(command,0 if status in ('completed','completed_empty') else 1)
+        with patch('content_screening.multi_collection.resolve_vendor_env',return_value=stub_vendor(self.root)), \
+             patch('content_screening.multi_collection.subprocess.run',side_effect=child):
+            return collect_selected(settings,self.folder,self.root)
+
+    def test_partial_platform_failure_is_never_reported_as_completed(self):
+        result=self._run_platforms({'bilibili':('completed',2,'public_source'),
+                                    'xhs':('failed',0,'public_source')})
+        self.assertEqual(result['status'],'partial')
+        self.assertEqual(result['incomplete_platforms'],['xhs'])
+        self.assertEqual(result['records'],2)
+        self.assertTrue(any(e.get('platform')=='xhs' for e in result['errors']))
+        rows=[json.loads(line) for line in Path(result['raw_file']).read_text(encoding='utf-8').splitlines()]
+        self.assertEqual({r['platform'] for r in rows},{'bilibili'})
+
+    def test_partial_login_failure_also_stays_partial(self):
+        result=self._run_platforms({'bilibili':('completed',2,'public_source'),
+                                    'xhs':('needs_user_login',0,'public_source')})
+        self.assertEqual(result['status'],'partial')
+        self.assertEqual(result['incomplete_platforms'],['xhs'])
+        self.assertEqual(result['records'],2)
+
+    def test_all_platforms_success_still_reports_completed(self):
+        result=self._run_platforms({'bilibili':('completed',2,'public_source'),
+                                    'xhs':('completed',1,'public_source')})
+        self.assertEqual(result['status'],'completed')
+        self.assertEqual(result['incomplete_platforms'],[])
+        self.assertEqual(result['records'],3)
+
+    def test_aggregate_identity_mode_reflects_child_receipts(self):
+        result=self._run_platforms({'bilibili':('completed',1,'public_source'),
+                                    'xhs':('completed',1,'public_source')})
+        self.assertEqual(result['identity_mode'],'public_source')
+        self.assertEqual(result['platform_identity_modes'],
+                         {'bilibili':'public_source','xhs':'public_source'})
+
+    def test_mixed_identity_modes_are_not_collapsed_to_one(self):
+        result=self._run_platforms({'bilibili':('completed',1,'public_source'),
+                                    'xhs':('completed',1,'upstream_anonymized')})
+        self.assertEqual(result['identity_mode'],'mixed')
+        self.assertEqual(len(result['platform_identity_modes']),2)
+
     def test_all_platforms_keep_distinct_content_and_anonymous_groups(self):
         from content_screening.workflow import run
         from content_screening.task_contract import default_task

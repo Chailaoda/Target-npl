@@ -30,7 +30,8 @@ def collect_selected(settings,folder,root):
     job=root/'data/collections'/dataset;job.mkdir(parents=True,exist_ok=False)
     raw=job/'raw.jsonl';raw.touch()
     status={'status':'running','settings':settings,'records':0,'posts':0,'comments':0,'requests':0,'errors':[],
-        'raw_file':str(raw),'proxy_mode':'direct','identity_mode':'upstream_anonymized',
+        'raw_file':str(raw),'proxy_mode':'direct','identity_mode':'unresolved',
+        'platform_identity_modes':{},'incomplete_platforms':[],
         'created_at_utc':datetime.now(timezone.utc).isoformat(),'platform_statuses':[],'aggregate':True}
     atomic_json(folder/'collection-progress.json',{'dataset_id':dataset})
     def save():atomic_json(job/'checkpoint.json',status)
@@ -69,9 +70,15 @@ def collect_selected(settings,folder,root):
             child_job=Path(data['raw_file']).parent.resolve()
             if not child_job.is_relative_to(Path(root/'data/collections').resolve()):raise ValueError('Invalid child source path')
             checkpoint=child_job/'checkpoint.json'
+            child_identity=''
             if checkpoint.exists():
-                child_state=json.loads(checkpoint.read_text(encoding='utf-8'));child_state['parent_dataset_id']=dataset;atomic_json(checkpoint,child_state)
+                child_state=json.loads(checkpoint.read_text(encoding='utf-8'))
+                child_identity=child_state.get('identity_mode','')
+                child_state['parent_dataset_id']=dataset;atomic_json(checkpoint,child_state)
+            mode=data.get('identity_mode') or child_identity
             if result.returncode==0 and data['status'] in ('completed','completed_empty'):
+                # 只汇总真正合并进 raw 的平台，失败平台的声明不算数据口径。
+                if mode:status['platform_identity_modes'][platform]=mode
                 with raw.open('a',encoding='utf-8') as target:
                     for line in Path(data['raw_file']).read_text(encoding='utf-8').splitlines():
                         if line.strip():
@@ -80,13 +87,26 @@ def collect_selected(settings,folder,root):
             for key in ('posts','comments'):status[key]+=data.get(key,0)
             status['requests']+=data.get('requests',0)
             status['platform_statuses'].append({'platform':platform,'status':data['status'],'records':data.get('records',0),'requests':data.get('requests',0),'dataset_id':Path(data['raw_file']).parent.name})
+            if data['status'] not in ('completed','completed_empty'):
+                status['errors'].append({'platform':platform,'code':data['status']})
         except (OSError,ValueError,KeyError,TypeError,subprocess.SubprocessError) as error:
             status['platform_statuses'].append({'platform':platform,'status':'failed','error_code':type(error).__name__})
             status['errors'].append({'platform':platform,'code':type(error).__name__})
         save()
     states=[s['status'] for s in status['platform_statuses']]
-    complete=len(states)==len(platforms) and all(s in ('completed','completed_empty') for s in states)
-    status['status']=('completed' if status['records'] else 'completed_empty') if complete else 'completed' if status['records'] else 'needs_user_login' if 'needs_user_login' in states else 'failed'
+    ok=('completed','completed_empty')
+    complete=len(states)==len(platforms) and all(s in ok for s in states)
+    status['incomplete_platforms']=[s['platform'] for s in status['platform_statuses'] if s['status'] not in ok]
+    modes=set(status['platform_identity_modes'].values())
+    status['identity_mode']=next(iter(modes)) if len(modes)==1 else 'mixed' if modes else 'unresolved'
+    if complete:
+        status['status']='completed' if status['records'] else 'completed_empty'
+    elif not status['records']:
+        status['status']='needs_user_login' if 'needs_user_login' in states else 'failed'
+    else:
+        # 有数据但并非所有平台都成功：绝不把不完整批次报告为成功。
+        # 上层可明确看到 partial + incomplete_platforms，再决定是否分析已成功部分。
+        status['status']='partial'
     status.update(raw_sha256=hashlib.sha256(raw.read_bytes()).hexdigest(),finished_at_utc=datetime.now(timezone.utc).isoformat())
     status.pop('active_platform',None);save()
     return status

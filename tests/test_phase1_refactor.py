@@ -197,5 +197,55 @@ class Phase1RefactorTests(unittest.TestCase):
         self.assertIn("部分未登录平台已自动弹出登录窗并跳过", state.get("message", ""))
 
 
+    def test_7_task_worker_marks_partial_collection_in_final_state(self):
+        """P1：部分平台失败时最终状态必须显式留痕，不能被当成完整任务。"""
+        from content_screening.task_worker import execute
+        from content_screening.task_service import atomic_json
+        from content_screening.pipeline import fingerprint
+        import shutil
+        run_id = "b" * 32
+        folder = ROOT / "data/task-runs" / run_id
+        folder.mkdir(parents=True, exist_ok=True)
+        if not folder.resolve().is_relative_to((ROOT / 'data/task-runs').resolve()):
+            raise ValueError('Test cleanup must stay inside task-runs')
+        self.addCleanup(shutil.rmtree, folder)
+
+        bundle = {
+            "policy": self.policy,
+            "collection": self.collection,
+            "task": default_task({"policy": self.policy})
+        }
+        bundle["task"]["execution"].update(source="collect", mode="rules")
+        req = {
+            "revision": "baseline", "bundle": bundle,
+            "signature": fingerprint({"revision": "baseline", "bundle": bundle})
+        }
+        atomic_json(folder / "request.json", req)
+        atomic_json(folder / "status.json", {"status": "pending"})
+        raw_mock = folder / "mock_raw.jsonl"
+        raw_mock.write_text(json.dumps({"platform": "bilibili", "content_id": "1", "text": "示例活动找搭子"}) + "\n", encoding="utf-8")
+        mock_result = {
+            "status": "partial", "raw_file": str(raw_mock),
+            "incomplete_platforms": ["xhs"],
+            "platform_statuses": [
+                {"platform": "bilibili", "status": "completed", "records": 1},
+                {"platform": "xhs", "status": "failed", "records": 0}
+            ]
+        }
+        mock_login = MagicMock()
+        with patch("content_screening.multi_collection.collect_selected", return_value=mock_result), \
+             patch("content_screening.platforms.open_login", mock_login), \
+             patch("content_screening.workflow.run", return_value={"status": "completed", "total": 1}):
+            state = execute(run_id, root=ROOT)
+
+        self.assertEqual(state["phase"], "finished")
+        self.assertTrue(state["collection_incomplete"])
+        self.assertEqual(state["collection_status"], "partial")
+        self.assertEqual(state["incomplete_platforms"], ["xhs"])
+        self.assertIn("部分平台采集未完成", state.get("message", ""))
+        self.assertNotIn("登录窗", state.get("message", ""))
+        mock_login.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

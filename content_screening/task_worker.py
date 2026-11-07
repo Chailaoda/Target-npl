@@ -23,6 +23,7 @@ def execute(run_id,root=ROOT):
     def update(**values):
         state.update(values,updated_at=datetime.now(timezone.utc).isoformat());atomic_json(folder/'status.json',state)
     update(status='running',phase='preparing',pid=os.getpid())
+    collection_incomplete=False;incomplete_platforms=[];collection_status=None
     try:
         for name in ('policy','collection','task'):atomic_json(folder/f'{name}.json',bundle[name])
         execution=bundle['task']['execution']
@@ -40,19 +41,38 @@ def execute(run_id,root=ROOT):
                         except Exception:pass
             raw_path=Path(data['raw_file']) if data.get('raw_file') else None
             has_raw_data=raw_path and raw_path.is_file() and raw_path.stat().st_size>0
+            incomplete_platforms=data.get('incomplete_platforms') or [
+                p.get('platform') for p in platform_statuses
+                if p.get('status') not in ('completed','completed_empty')]
+            collection_incomplete=bool(incomplete_platforms)
+            collection_status=data['status']
             if data['status'] not in ('completed','completed_empty'):
                 if has_raw_data:
                     source=raw_path
-                    update(status='running',phase='analyzing',platform_statuses=platform_statuses,message='部分未登录平台已自动弹出登录窗并跳过，已优先完成其余平台数据分析')
+                    login_pending=any(p.get('status')=='needs_user_login' for p in platform_statuses)
+                    message=('部分未登录平台已自动弹出登录窗并跳过，已优先完成其余平台数据分析' if login_pending
+                             else '部分平台采集未完成（{}），已优先完成其余平台数据分析；结果不完整'.format(
+                                 '、'.join(str(x) for x in incomplete_platforms)))
+                    update(status='running',phase='analyzing',platform_statuses=platform_statuses,
+                           collection_status=collection_status,incomplete_platforms=incomplete_platforms,
+                           collection_incomplete=collection_incomplete,message=message)
                 else:
-                    update(status='needs_user_login' if data['status']=='needs_user_login' else 'failed',phase='collection_stopped',collection_status=data['status'],platform_statuses=platform_statuses);return state
+                    update(status='needs_user_login' if data['status']=='needs_user_login' else 'failed',
+                           phase='collection_stopped',collection_status=collection_status,
+                           platform_statuses=platform_statuses,incomplete_platforms=incomplete_platforms,
+                           collection_incomplete=collection_incomplete);return state
             else:
                 source=Path(data['raw_file'])
         update(phase='analyzing',dataset_id=source.parent.name,input_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
         from .workflow import run
         result=run(source,folder/'policy.json',Path(root)/'data/screening.sqlite3',Path(root)/'output/task-runs'/run_id,
                    execution['mode'],Path(root)/'config/connection.json',execution['max_api_calls'],task=bundle['task'],config_revision=request['revision'],on_start=lambda job_id:update(analysis_job_id=job_id))
-        update(status=result['status'],phase='finished',result=result)
+        finished={'status':result['status'],'phase':'finished','result':result}
+        if collection_incomplete:
+            # 分析结果可能已完成，但采集本身不完整：显式留痕，禁止被当成完整任务。
+            finished.update(collection_status=collection_status,collection_incomplete=True,
+                            incomplete_platforms=incomplete_platforms)
+        update(**finished)
     except (ValueError,OSError,subprocess.SubprocessError) as error:
         update(status='failed',phase='stopped',error_code=type(error).__name__,message=str(error)[:300])
     return state

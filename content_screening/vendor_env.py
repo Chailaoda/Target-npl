@@ -59,8 +59,8 @@ def load_registry(root=None, decl=None):
     Validation also applies to an injected declaration object, so callers
     cannot bypass the "fork must not overwrite the baseline" guard.
     """
+    root = Path(root or PROJECT_ROOT).resolve()
     if decl is None:
-        root = Path(root or PROJECT_ROOT).resolve()
         path = root / "third_party" / "mediacrawler.json"
         if not path.is_file():
             raise VendorEnvironmentError("REGISTRY_MISSING", f"dependency declaration not found: {path}")
@@ -69,7 +69,9 @@ def load_registry(root=None, decl=None):
     for key in ("repository", "commit", "local_path"):
         if not decl.get(key) or not fork.get(key):
             raise VendorEnvironmentError("REGISTRY_INCOMPLETE", f"missing '{key}' in declaration")
-    if Path(decl["local_path"]) == Path(fork["local_path"]):
+    # Compare fully resolved paths: ".." aliases, junctions and symlinks that
+    # point at the same physical directory must not slip through as "separate".
+    if _resolve_dir(root, decl["local_path"]) == _resolve_dir(root, fork["local_path"]):
         raise VendorEnvironmentError(
             "REGISTRY_PATH_COLLISION",
             "controlled fork must use a separate directory; overwriting the pinned upstream baseline is forbidden")
@@ -235,9 +237,18 @@ def resolve_vendor_env(root=None, env=None, *, decl=None, run=None,
             f"{ENV_PUBLIC} must be 0, 1, auto or unset; got {flag!r}")
 
     pinned = env.get(ENV_VENDOR_DIR)
+    pinned_sha = (env.get(ENV_SHA) or "").strip()
+    pinned_kind = (env.get(ENV_KIND) or "").strip()
     if pinned:
-        # The scheduler locked this directory for its child process.
+        # The scheduler locked this directory for its child process. A pinned
+        # path may only be one of the two DECLARED install locations; a random
+        # directory holding a whitelisted commit must never be accepted.
         source_dir = Path(pinned).resolve()
+        if source_dir not in (baseline_dir, controlled_dir):
+            raise VendorEnvironmentError(
+                "VENDOR_DIR_NOT_DECLARED",
+                f"{ENV_VENDOR_DIR}={source_dir} is not a declared dependency directory; "
+                f"expected {baseline_dir} or {controlled_dir}")
     elif want_public:
         source_dir = controlled_dir
     elif baseline_dir.is_dir() and (baseline_dir / ".git").exists():
@@ -272,7 +283,28 @@ def resolve_vendor_env(root=None, env=None, *, decl=None, run=None,
             f"public-account collection requested but the selected vendor ({source_dir}) is the upstream "
             f"baseline {sha[:7]}; refusing to fall back to anonymous collection")
 
-    status = _git(source_dir, ["status", "--porcelain", "--untracked-files=all"], run)
+    # Directory and commit must agree: an upstream tree may only live in the
+    # declared baseline directory, a fork tree only in the declared fork dir.
+    expected_dir = controlled_dir if kind == "controlled_fork" else baseline_dir
+    if source_dir != expected_dir:
+        raise VendorEnvironmentError(
+            "VENDOR_DIR_KIND_MISMATCH",
+            f"{kind} must be installed in {expected_dir}, but {source_dir} was selected")
+    # Child processes inherit the scheduler's pins; any drift is a hard stop.
+    if pinned_sha and pinned_sha != sha:
+        raise VendorEnvironmentError(
+            "VENDOR_SHA_MISMATCH",
+            f"scheduler pinned {ENV_SHA}={pinned_sha} but the selected tree HEAD is {sha}")
+    if pinned_kind and pinned_kind != kind:
+        raise VendorEnvironmentError(
+            "VENDOR_KIND_MISMATCH",
+            f"scheduler pinned {ENV_KIND}={pinned_kind} but the selected tree is {kind}")
+
+    try:
+        status = _git(source_dir, ["status", "--porcelain", "--untracked-files=all"], run)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise VendorEnvironmentError(
+            "VENDOR_GIT_UNAVAILABLE", f"cannot read git status of {source_dir}: {error}") from error
     dirty = [line for line in status.splitlines() if line and not is_pycache_entry(line)]
     if dirty:
         raise VendorEnvironmentError(
