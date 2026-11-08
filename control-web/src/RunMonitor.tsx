@@ -79,6 +79,14 @@ const statusNames: Record<string, string> = {
   partial: '部分完成'
 }
 
+// Top status pill label. A run whose collection is incomplete must never read
+// "已完成", even if an older/partial server response still carries a
+// completed-style status. Extracted so the display contract is testable.
+export function taskStatusLabel(status: string, collectionIncomplete = false): string {
+  if (collectionIncomplete && status.startsWith('completed')) return '部分完成（采集不完整）'
+  return statusNames[status] || status
+}
+
 // 平台通道状态：[文案, 视觉状态, 颜色]
 const laneStates: Record<string, [string, string, string]> = {
   running: ['采集中', 'running', 'var(--accent)'],
@@ -189,7 +197,7 @@ export default function RunMonitor({
   onAddBlacklistWord,
   onRequestOpenLogin
 }: {
-  run: { run_id: string; status: string; phase?: string; result?: { report: string } } | null
+  run: { run_id: string; status: string; phase?: string; collection_incomplete?: boolean; result?: { report: string } } | null
   live: LiveData | null
   error?: string
   onSendToTest?: (text: string, context?: string) => void
@@ -312,8 +320,8 @@ export default function RunMonitor({
       <div className="run-head">
         <div className="run-head-left">
           <span className="status-pill">
-            <span className={`live-dot ${running ? 'on' : ''}`} style={{ '--dc': running ? 'var(--accent)' : run.status.startsWith('completed') ? 'var(--text-2)' : 'var(--warn)' } as CSSProperties} />
-            {statusNames[run.status] || run.status}
+            <span className={`live-dot ${running ? 'on' : ''}`} style={{ '--dc': running ? 'var(--accent)' : run.status.startsWith('completed') && !run.collection_incomplete ? 'var(--text-2)' : 'var(--warn)' } as CSSProperties} />
+            {taskStatusLabel(run.status, run.collection_incomplete)}
           </span>
           <span className="run-meta">{phaseNames[run.phase || ''] || run.phase || '—'} · 批次 {run.run_id.slice(0, 8)}</span>
         </div>

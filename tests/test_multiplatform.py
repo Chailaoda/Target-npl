@@ -109,7 +109,9 @@ class PlatformTests(unittest.TestCase):
     def _run_platforms(self, outcomes):
         """Drive collect_selected with mocked children; no network or login.
 
-        outcomes maps platform -> (child status, records, identity_mode).
+        outcomes maps platform -> (child status, records, identity_mode[,
+        exit_code]). The optional exit_code lets a test build a child that
+        crashed while still leaving a "completed" receipt behind.
         """
         names=list(outcomes)
         settings=dict(self.settings,platforms=names,platform=names[0],
@@ -120,13 +122,15 @@ class PlatformTests(unittest.TestCase):
             folder=self.root/'data/collections'/('20261107T00000000000%dZ'%index)
             folder.mkdir(parents=True,exist_ok=True)
             raw=folder/'raw.jsonl';raw.touch()
-            status,records,mode=outcomes[platform]
+            outcome=outcomes[platform]
+            status,records,mode=outcome[:3]
+            exit_code=outcome[3] if len(outcome)>3 else (0 if status in ('completed','completed_empty') else 1)
             rows=[{'platform':platform,'object_type':'post','data':{'content_id':str(i),'text':'公开原文'}} for i in range(records)]
             if rows:raw.write_text(''.join(json.dumps(r)+'\n' for r in rows),encoding='utf-8')
             state={'status':status,'records':records,'posts':records,'comments':0,'requests':2,
                    'raw_file':str(raw),'settings':value,'identity_mode':mode}
             atomic_json(Path(command[command.index('--receipt')+1]),state)
-            return subprocess.CompletedProcess(command,0 if status in ('completed','completed_empty') else 1)
+            return subprocess.CompletedProcess(command,exit_code)
         with patch('content_screening.multi_collection.resolve_vendor_env',return_value=stub_vendor(self.root)), \
              patch('content_screening.multi_collection.subprocess.run',side_effect=child):
             return collect_selected(settings,self.folder,self.root)
@@ -167,6 +171,48 @@ class PlatformTests(unittest.TestCase):
                                     'xhs':('completed',1,'upstream_anonymized')})
         self.assertEqual(result['identity_mode'],'mixed')
         self.assertEqual(len(result['platform_identity_modes']),2)
+
+    # --- P1-2: child exit code must agree with its receipt ----------------
+    def test_nonzero_exit_with_success_receipt_is_not_a_success(self):
+        result=self._run_platforms({'bilibili':('completed',2,'public_source'),
+                                    'xhs':('completed',3,'public_source',1)})
+        self.assertEqual(result['status'],'partial')
+        lane=next(p for p in result['platform_statuses'] if p['platform']=='xhs')
+        self.assertEqual(lane['status'],'failed')
+        self.assertEqual(lane['exit_code'],1)
+        self.assertEqual(lane['receipt_status'],'completed')
+        self.assertTrue(any(e.get('code')=='CHILD_EXIT_RECEIPT_CONFLICT' for e in result['errors']))
+        self.assertEqual(result['records'],2)
+        rows=[json.loads(line) for line in Path(result['raw_file']).read_text(encoding='utf-8').splitlines()]
+        self.assertEqual({r['platform'] for r in rows},{'bilibili'})
+        self.assertEqual(result['platform_identity_modes'],{'bilibili':'public_source'})
+
+    def test_all_conflicting_children_never_report_completed_empty(self):
+        result=self._run_platforms({'bilibili':('completed',2,'public_source',1)})
+        self.assertEqual(result['status'],'failed')
+        self.assertEqual(result['records'],0)
+        self.assertEqual(result['identity_mode'],'unresolved')
+        self.assertEqual(result['platform_statuses'][0]['status'],'failed')
+
+    # --- P2: only actually merged content defines the identity mode ------
+    def test_completed_empty_does_not_contribute_identity_mode(self):
+        result=self._run_platforms({'bilibili':('completed',1,'public_source'),
+                                    'xhs':('completed_empty',0,'upstream_anonymized')})
+        self.assertEqual(result['status'],'completed')
+        self.assertEqual(result['identity_mode'],'public_source')
+        self.assertEqual(result['platform_identity_modes'],{'bilibili':'public_source'})
+
+    def test_missing_identity_mode_forces_unresolved(self):
+        result=self._run_platforms({'bilibili':('completed',1,'public_source'),
+                                    'xhs':('completed',1,'')})
+        self.assertEqual(result['identity_mode'],'unresolved')
+        self.assertEqual(result['platform_identity_modes']['xhs'],'unresolved')
+
+    def test_untrusted_identity_mode_forces_unresolved(self):
+        result=self._run_platforms({'bilibili':('completed',1,'public_source'),
+                                    'xhs':('completed',1,'unknown')})
+        self.assertEqual(result['identity_mode'],'unresolved')
+        self.assertEqual(result['platform_identity_modes']['xhs'],'unresolved')
 
     def test_all_platforms_keep_distinct_content_and_anonymous_groups(self):
         from content_screening.workflow import run

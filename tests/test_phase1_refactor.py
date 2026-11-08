@@ -197,13 +197,12 @@ class Phase1RefactorTests(unittest.TestCase):
         self.assertIn("部分未登录平台已自动弹出登录窗并跳过", state.get("message", ""))
 
 
-    def test_7_task_worker_marks_partial_collection_in_final_state(self):
-        """P1：部分平台失败时最终状态必须显式留痕，不能被当成完整任务。"""
+    def _partial_worker_state(self, analysis_status, run_id):
+        """Run a task whose collection is partial; return (state, mock_login)."""
         from content_screening.task_worker import execute
         from content_screening.task_service import atomic_json
         from content_screening.pipeline import fingerprint
         import shutil
-        run_id = "b" * 32
         folder = ROOT / "data/task-runs" / run_id
         folder.mkdir(parents=True, exist_ok=True)
         if not folder.resolve().is_relative_to((ROOT / 'data/task-runs').resolve()):
@@ -235,16 +234,31 @@ class Phase1RefactorTests(unittest.TestCase):
         mock_login = MagicMock()
         with patch("content_screening.multi_collection.collect_selected", return_value=mock_result), \
              patch("content_screening.platforms.open_login", mock_login), \
-             patch("content_screening.workflow.run", return_value={"status": "completed", "total": 1}):
+             patch("content_screening.workflow.run", return_value={"status": analysis_status, "total": 1}):
             state = execute(run_id, root=ROOT)
+        return state, mock_login
 
+    def test_7_task_worker_marks_partial_collection_in_final_state(self):
+        """P1-1：采集不完整 + 分析成功，整体状态必须是 partial 而非 completed。"""
+        state, mock_login = self._partial_worker_state('completed', 'b' * 32)
         self.assertEqual(state["phase"], "finished")
+        self.assertEqual(state["status"], "partial")
+        self.assertNotEqual(state["status"], "completed")
+        self.assertEqual(state["analysis_status"], "completed")
         self.assertTrue(state["collection_incomplete"])
         self.assertEqual(state["collection_status"], "partial")
         self.assertEqual(state["incomplete_platforms"], ["xhs"])
         self.assertIn("部分平台采集未完成", state.get("message", ""))
         self.assertNotIn("登录窗", state.get("message", ""))
         mock_login.assert_not_called()
+
+    def test_8_analysis_failure_keeps_failure_status(self):
+        """P1-1：分析本身失败时保留失败状态，不被 partial 覆盖。"""
+        state, _ = self._partial_worker_state('failed', 'c' * 32)
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(state["analysis_status"], "failed")
+        self.assertTrue(state["collection_incomplete"])
+        self.assertEqual(state["collection_status"], "partial")
 
 
 if __name__ == "__main__":

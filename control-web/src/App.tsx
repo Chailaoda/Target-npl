@@ -111,6 +111,7 @@ type RunState = {
   status: string
   phase?: string
   message?: string
+  collection_incomplete?: boolean
   result?: { candidate_contents: number; unique_contents: number; report: string }
 }
 

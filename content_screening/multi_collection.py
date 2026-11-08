@@ -11,6 +11,11 @@ from .platforms import selected
 from .task_service import atomic_json
 from .vendor_env import resolve_vendor_env,VendorEnvironmentError
 
+# Only these receipt values describe a trustworthy content identity source.
+# Anything else (including an empty value) is recorded as 'unresolved' rather
+# than letting another platform's mode stand in for the whole batch.
+TRUSTED_IDENTITY_MODES=frozenset({'public_source','upstream_anonymized'})
+
 
 def collection_command(root,python,script,config,receipt,progress):
     """Build one child launch command.
@@ -76,19 +81,43 @@ def collect_selected(settings,folder,root):
                 child_identity=child_state.get('identity_mode','')
                 child_state['parent_dataset_id']=dataset;atomic_json(checkpoint,child_state)
             mode=data.get('identity_mode') or child_identity
-            if result.returncode==0 and data['status'] in ('completed','completed_empty'):
-                # 只汇总真正合并进 raw 的平台，失败平台的声明不算数据口径。
-                if mode:status['platform_identity_modes'][platform]=mode
+            receipt_status=data['status']
+            exit_code=result.returncode
+            declared_ok=receipt_status in ('completed','completed_empty')
+            # A non-zero exit WITH a success receipt is a conflict: no raw data
+            # was merged, so the platform must never be counted as successful.
+            conflict=exit_code!=0 and declared_ok
+            child_ok=exit_code==0 and declared_ok
+            effective='failed' if conflict else receipt_status
+            merged=0
+            if child_ok:
                 with raw.open('a',encoding='utf-8') as target:
                     for line in Path(data['raw_file']).read_text(encoding='utf-8').splitlines():
                         if line.strip():
-                            row=json.loads(line);row.setdefault('platform',platform);target.write(json.dumps(row,ensure_ascii=False)+'\n')
-                status['records']+=data.get('records',0)
-            for key in ('posts','comments'):status[key]+=data.get(key,0)
+                            row=json.loads(line);row.setdefault('platform',platform)
+                            target.write(json.dumps(row,ensure_ascii=False)+'\n');merged+=1
+                status['records']+=merged
+                for key in ('posts','comments'):status[key]+=data.get(key,0)
+                # Only platforms with ACTUALLY merged content contribute to the
+                # aggregate identity mode. completed_empty contributes nothing;
+                # missing/untrusted modes are explicit 'unresolved'.
+                if merged:
+                    status['platform_identity_modes'][platform]=(
+                        mode if mode in TRUSTED_IDENTITY_MODES else 'unresolved')
+            # Requests are real traffic even when the child failed; keep them
+            # for the shared budget, but never count unmerged posts/comments.
             status['requests']+=data.get('requests',0)
-            status['platform_statuses'].append({'platform':platform,'status':data['status'],'records':data.get('records',0),'requests':data.get('requests',0),'dataset_id':Path(data['raw_file']).parent.name})
-            if data['status'] not in ('completed','completed_empty'):
-                status['errors'].append({'platform':platform,'code':data['status']})
+            status['platform_statuses'].append({
+                'platform':platform,'status':effective,
+                'records':data.get('records',0) if child_ok else 0,
+                'requests':data.get('requests',0),
+                'dataset_id':Path(data['raw_file']).parent.name,
+                'exit_code':exit_code,'receipt_status':receipt_status})
+            if not child_ok:
+                status['errors'].append({
+                    'platform':platform,
+                    'code':'CHILD_EXIT_RECEIPT_CONFLICT' if conflict else receipt_status,
+                    'exit_code':exit_code,'receipt_status':receipt_status})
         except (OSError,ValueError,KeyError,TypeError,subprocess.SubprocessError) as error:
             status['platform_statuses'].append({'platform':platform,'status':'failed','error_code':type(error).__name__})
             status['errors'].append({'platform':platform,'code':type(error).__name__})
@@ -98,7 +127,14 @@ def collect_selected(settings,folder,root):
     complete=len(states)==len(platforms) and all(s in ok for s in states)
     status['incomplete_platforms']=[s['platform'] for s in status['platform_statuses'] if s['status'] not in ok]
     modes=set(status['platform_identity_modes'].values())
-    status['identity_mode']=next(iter(modes)) if len(modes)==1 else 'mixed' if modes else 'unresolved'
+    # An unresolved platform can never be inferred from another platform's
+    # public_source mode: the whole batch stays unresolved.
+    if not modes or 'unresolved' in modes:
+        status['identity_mode']='unresolved'
+    elif len(modes)==1:
+        status['identity_mode']=next(iter(modes))
+    else:
+        status['identity_mode']='mixed'
     if complete:
         status['status']='completed' if status['records'] else 'completed_empty'
     elif not status['records']:

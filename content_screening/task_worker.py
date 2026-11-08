@@ -67,10 +67,18 @@ def execute(run_id,root=ROOT):
         from .workflow import run
         result=run(source,folder/'policy.json',Path(root)/'data/screening.sqlite3',Path(root)/'output/task-runs'/run_id,
                    execution['mode'],Path(root)/'config/connection.json',execution['max_api_calls'],task=bundle['task'],config_revision=request['revision'],on_start=lambda job_id:update(analysis_job_id=job_id))
-        finished={'status':result['status'],'phase':'finished','result':result}
-        if collection_incomplete:
-            # 分析结果可能已完成，但采集本身不完整：显式留痕，禁止被当成完整任务。
-            finished.update(collection_status=collection_status,collection_incomplete=True,
+        analysis_status=result['status']
+        analysis_ok=analysis_status in ('completed','completed_empty','completed_with_review')
+        # Collection / analysis / overall are three distinct states. An
+        # incomplete collection must never surface as a completed task even
+        # when the analysis of the partial data succeeded; a failed analysis
+        # keeps its own failure status.
+        overall='partial' if collection_incomplete and analysis_ok else analysis_status
+        finished={'status':overall,'phase':'finished','result':result,
+                  'analysis_status':analysis_status}
+        if collection_status is not None:
+            finished.update(collection_status=collection_status,
+                            collection_incomplete=collection_incomplete,
                             incomplete_platforms=incomplete_platforms)
         update(**finished)
     except (ValueError,OSError,subprocess.SubprocessError) as error:
