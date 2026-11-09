@@ -49,20 +49,52 @@ def live(service,run_id):
         settings=data.get('settings') or {}
         if settings:collection['platforms']=settings.get('platforms') or [settings.get('platform')]
         if data.get('aggregate'):
-            details=[]
+            # Parent checkpoint entries are the ONLY authoritative final
+            # verdict: each one was checked against the child's exit code and
+            # receipt (non-zero exit + success receipt -> 'failed'). A child
+            # checkpoint can still claim 'completed', so it may contribute
+            # request counts / progress detail but must never replace that
+            # verified status. Likewise, only verified-success lanes may feed
+            # the live stream; a failed child's rows are never shown.
             from .platforms import PLATFORMS
+            child_sources={}
             for platform in PLATFORMS:
                 child_pointer=folder/'platform-live'/platform/'collection-progress.json'
-                if child_pointer.exists():
-                    child_id=json.loads(child_pointer.read_text(encoding='utf-8')).get('dataset_id','')
-                    if re.fullmatch(r'\d{8}T\d{12}Z',child_id):
-                        child_source=service.root/'data/collections'/child_id;sources.append(child_source/'raw.jsonl')
-                        child_checkpoint=child_source/'checkpoint.json'
-                        if child_checkpoint.exists():
-                            child=json.loads(child_checkpoint.read_text(encoding='utf-8'))
-                            details.append({'platform':platform,'status':child.get('status'),'requests':child.get('requests',0)})
+                if not child_pointer.exists():continue
+                child_id=json.loads(child_pointer.read_text(encoding='utf-8')).get('dataset_id','')
+                if re.fullmatch(r'\d{8}T\d{12}Z',child_id):
+                    child_sources[platform]=service.root/'data/collections'/child_id
+            details=[];seen=set()
+            for entry in (data.get('platform_statuses') or []):
+                if not isinstance(entry,dict) or not entry.get('platform'):continue
+                platform=entry['platform']
+                if platform in seen:continue
+                seen.add(platform)
+                item=dict(entry)
+                child_source=child_sources.get(platform)
+                if child_source:
+                    child_checkpoint=child_source/'checkpoint.json'
+                    if child_checkpoint.exists():
+                        child=json.loads(child_checkpoint.read_text(encoding='utf-8'))
+                        # Detail only: never copy child['status'] onto item.
+                        item.setdefault('requests',child.get('requests',0))
+                    item.setdefault('dataset_id',child_source.name)
+                    if item.get('status') in ('completed','completed_empty'):
+                        sources.append(child_source/'raw.jsonl')
+                details.append(item)
+            if data.get('status')=='running':
+                # Lanes the parent has not judged yet are still in flight.
+                # Show live progress, but never an unverified terminal state.
+                for platform in PLATFORMS:
+                    if platform in seen or platform not in child_sources:continue
+                    child_source=child_sources[platform]
+                    child_checkpoint=child_source/'checkpoint.json'
+                    child=json.loads(child_checkpoint.read_text(encoding='utf-8')) if child_checkpoint.exists() else {}
+                    details.append({'platform':platform,'status':'running',
+                        'requests':child.get('requests',0),'dataset_id':child_source.name})
+                    sources.append(child_source/'raw.jsonl')
             if details:
-                collection['platform_statuses']=details;collection['requests']=sum(p['requests'] for p in details)
+                collection['platform_statuses']=details;collection['requests']=sum(p.get('requests',0) for p in details)
         if not sources:sources=[source/'raw.jsonl']
     for raw in sources:
         if not raw.exists():continue

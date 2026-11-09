@@ -106,12 +106,14 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(result['status'],'needs_user_login');self.assertEqual(result['requests'],0)
         self.assertEqual(len(result['platform_statuses']),2)
 
-    def _run_platforms(self, outcomes):
+    def _run_platforms(self, outcomes, corrupt_platform=None):
         """Drive collect_selected with mocked children; no network or login.
 
         outcomes maps platform -> (child status, records, identity_mode[,
         exit_code]). The optional exit_code lets a test build a child that
-        crashed while still leaving a "completed" receipt behind.
+        crashed while still leaving a "completed" receipt behind. Setting
+        corrupt_platform injects a truncated third line into that child's
+        raw.jsonl (first two lines stay valid) to exercise atomic merging.
         """
         names=list(outcomes)
         settings=dict(self.settings,platforms=names,platform=names[0],
@@ -126,7 +128,11 @@ class PlatformTests(unittest.TestCase):
             status,records,mode=outcome[:3]
             exit_code=outcome[3] if len(outcome)>3 else (0 if status in ('completed','completed_empty') else 1)
             rows=[{'platform':platform,'object_type':'post','data':{'content_id':str(i),'text':'公开原文'}} for i in range(records)]
-            if rows:raw.write_text(''.join(json.dumps(r)+'\n' for r in rows),encoding='utf-8')
+            lines=[json.dumps(r)+'\n' for r in rows]
+            if corrupt_platform==platform:
+                # First two lines are valid, the third one is broken JSON.
+                lines.insert(2,'{"object_type":"post","data":{"broken":\n')
+            raw.write_text(''.join(lines),encoding='utf-8')
             state={'status':status,'records':records,'posts':records,'comments':0,'requests':2,
                    'raw_file':str(raw),'settings':value,'identity_mode':mode}
             atomic_json(Path(command[command.index('--receipt')+1]),state)
@@ -193,6 +199,37 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(result['records'],0)
         self.assertEqual(result['identity_mode'],'unresolved')
         self.assertEqual(result['platform_statuses'][0]['status'],'failed')
+
+    # --- Round 8: a corrupt child file must merge atomically -------------
+    def test_corrupt_child_jsonl_leaves_no_partial_rows_in_aggregate(self):
+        result=self._run_platforms(
+            {'bilibili':('completed',2,'public_source'),
+             'xhs':('completed',4,'public_source')},corrupt_platform='xhs')
+        self.assertEqual(result['status'],'partial')
+        lane=next(p for p in result['platform_statuses'] if p['platform']=='xhs')
+        self.assertEqual(lane['status'],'failed')
+        self.assertEqual(lane.get('records',0),0)
+        self.assertTrue(any(e.get('platform')=='xhs' and e.get('code')=='JSONDecodeError'
+                            for e in result['errors']))
+        # Nothing from the failed child may survive in the parent raw.jsonl,
+        # and its receipt counts must not inflate the aggregate.
+        text=Path(result['raw_file']).read_text(encoding='utf-8')
+        rows=[json.loads(line) for line in text.splitlines()]
+        self.assertEqual(len(text.splitlines()),2)
+        self.assertEqual({r['platform'] for r in rows},{'bilibili'})
+        self.assertEqual(result['records'],2)
+        self.assertEqual(result['posts'],2)
+        self.assertEqual(result['platform_identity_modes'],{'bilibili':'public_source'})
+
+    def test_corrupt_only_child_never_leaves_data_for_analysis(self):
+        # Worst case from the review: no platform succeeded, so task_worker
+        # must see an EMPTY raw file and stop instead of analysing residue.
+        result=self._run_platforms({'xhs':('completed',4,'public_source')},corrupt_platform='xhs')
+        self.assertEqual(result['status'],'failed')
+        self.assertEqual(result['records'],0)
+        self.assertEqual(result['posts'],0)
+        self.assertEqual(result['identity_mode'],'unresolved')
+        self.assertEqual(Path(result['raw_file']).read_text(encoding='utf-8'),'')
 
     # --- P2: only actually merged content defines the identity mode ------
     def test_completed_empty_does_not_contribute_identity_mode(self):

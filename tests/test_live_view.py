@@ -72,5 +72,73 @@ class LiveTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as caught:opener.open(url+'/reports/'+self.run_id)
         self.assertEqual(caught.exception.code,404)
 
+    def _child_lane(self,platform,dataset,status,requests,rows):
+        """A child platform-live pointer + dataset, including its own checkpoint."""
+        pointer=self.folder/'platform-live'/platform
+        pointer.mkdir(parents=True,exist_ok=True)
+        atomic_json(pointer/'collection-progress.json',{'dataset_id':dataset})
+        source=self.root/'data/collections'/dataset
+        source.mkdir(parents=True,exist_ok=True)
+        atomic_json(source/'checkpoint.json',{'status':status,'requests':requests,'posts':len(rows)})
+        (source/'raw.jsonl').write_text(''.join(json.dumps(r,ensure_ascii=False)+'\n' for r in rows),encoding='utf-8')
+        return source
+
+    # --- Round 8: Web lane status must follow the parent's verified verdict --
+    def test_live_platform_status_uses_parent_verdict_not_child_checkpoint(self):
+        # xhs crashed (exit 1) but left a 'completed' receipt AND a
+        # 'completed' child checkpoint. Only the parent knows it failed.
+        ok_rows=[{'platform':'bilibili','object_type':'post','data':{'content_id':str(i),'desc':'公开原文'}} for i in range(2)]
+        bad_rows=[{'platform':'xhs','object_type':'post','data':{'content_id':str(i),'text':'失败平台不应显示'}} for i in range(3)]
+        atomic_json(self.source/'checkpoint.json',{
+            'status':'partial','aggregate':True,'posts':2,'comments':0,'requests':5,
+            'settings':{'platforms':['bilibili','xhs']},'incomplete_platforms':['xhs'],
+            'platform_statuses':[
+                {'platform':'bilibili','status':'completed','records':2,'requests':2,
+                 'exit_code':0,'receipt_status':'completed'},
+                {'platform':'xhs','status':'failed','records':0,'requests':3,
+                 'exit_code':1,'receipt_status':'completed'}]})
+        (self.source/'raw.jsonl').write_text(''.join(json.dumps(r,ensure_ascii=False)+'\n' for r in ok_rows),encoding='utf-8')
+        self._child_lane('bilibili','20261030T000000000001Z','completed',2,ok_rows)
+        self._child_lane('xhs','20261030T000000000002Z','completed',3,bad_rows)
+        view=live(self.service,self.run_id)
+        lanes={p['platform']:p for p in view['collection']['platform_statuses']}
+        self.assertEqual(lanes['xhs']['status'],'failed')
+        self.assertEqual(lanes['xhs']['exit_code'],1)
+        self.assertEqual(lanes['xhs']['receipt_status'],'completed')
+        self.assertEqual(lanes['bilibili']['status'],'completed')
+        self.assertEqual(view['collection']['requests'],5)
+        # Failed child rows must not reach the Web feed either.
+        self.assertEqual(view['captured_total'],2)
+        self.assertTrue(all(c['platform']=='bilibili' for c in view['captured']))
+        self.assertNotIn('失败平台不应显示',json.dumps(view,ensure_ascii=False))
+
+    def test_live_does_not_fabricate_completed_lane_without_parent_verdict(self):
+        atomic_json(self.source/'checkpoint.json',{
+            'status':'failed','aggregate':True,'posts':0,'requests':0,
+            'settings':{'platforms':['xhs']},'platform_statuses':[]})
+        (self.source/'raw.jsonl').write_text('',encoding='utf-8')
+        self._child_lane('xhs','20261030T000000000002Z','completed',1,
+            [{'platform':'xhs','object_type':'post','data':{'content_id':'1','text':'不应显示'}}])
+        view=live(self.service,self.run_id)
+        self.assertFalse(any(p.get('status') in ('completed','completed_empty')
+                             for p in view['collection']['platform_statuses']))
+        self.assertEqual(view['captured_total'],0)
+
+    def test_live_still_shows_in_flight_progress_while_collecting(self):
+        ok_rows=[{'platform':'bilibili','object_type':'post','data':{'content_id':str(i),'desc':'公开原文'}} for i in range(2)]
+        running_rows=[{'platform':'xhs','object_type':'post','data':{'content_id':'1','text':'采集中原文'}}]
+        atomic_json(self.source/'checkpoint.json',{
+            'status':'running','aggregate':True,'requests':3,
+            'settings':{'platforms':['bilibili','xhs']},
+            'platform_statuses':[{'platform':'bilibili','status':'completed','records':2,'requests':2}]})
+        (self.source/'raw.jsonl').write_text(''.join(json.dumps(r,ensure_ascii=False)+'\n' for r in ok_rows),encoding='utf-8')
+        self._child_lane('bilibili','20261030T000000000001Z','completed',2,ok_rows)
+        self._child_lane('xhs','20261030T000000000002Z','running',1,running_rows)
+        view=live(self.service,self.run_id)
+        lanes={p['platform']:p for p in view['collection']['platform_statuses']}
+        self.assertEqual(lanes['bilibili']['status'],'completed')
+        self.assertEqual(lanes['xhs']['status'],'running')
+        self.assertEqual(view['captured_total'],3)
+
 
 if __name__=='__main__':unittest.main()

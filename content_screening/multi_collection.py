@@ -91,11 +91,20 @@ def collect_selected(settings,folder,root):
             effective='failed' if conflict else receipt_status
             merged=0
             if child_ok:
-                with raw.open('a',encoding='utf-8') as target:
-                    for line in Path(data['raw_file']).read_text(encoding='utf-8').splitlines():
-                        if line.strip():
-                            row=json.loads(line);row.setdefault('platform',platform)
-                            target.write(json.dumps(row,ensure_ascii=False)+'\n');merged+=1
+                # Parse and validate the WHOLE child file in memory before
+                # touching the parent aggregate. A corrupt/truncated line must
+                # not leave earlier rows from this platform committed (which
+                # would make task_worker analyse data from a failed child).
+                rows=[]
+                for line in Path(data['raw_file']).read_text(encoding='utf-8').splitlines():
+                    if not line.strip():continue
+                    row=json.loads(line)
+                    if not isinstance(row,dict):raise ValueError('Invalid child raw record')
+                    row.setdefault('platform',platform)
+                    rows.append(json.dumps(row,ensure_ascii=False)+'\n')
+                if rows:
+                    with raw.open('a',encoding='utf-8') as target:target.write(''.join(rows))
+                merged=len(rows)
                 status['records']+=merged
                 for key in ('posts','comments'):status[key]+=data.get(key,0)
                 # Only platforms with ACTUALLY merged content contribute to the
