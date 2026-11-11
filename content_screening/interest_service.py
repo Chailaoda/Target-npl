@@ -3,6 +3,15 @@
 Rules are the auditable baseline: an arbitrary topic is supplied by the caller,
 not selected from a built-in taxonomy. A prior v2 analysis only makes content
 eligible; it is never reused as proof of relevance to a new topic.
+
+Scoring contract (keep UI wording aligned):
+  * interest_score is a deterministic saturation mapping of the independent,
+    quality-weighted evidence contributions inside the selected window. It is
+    NOT a probability, a personality judgement, or positive preference.
+  * stance, evidence_count and coverage are reported separately.
+  * The half-life is used for recent/previous participation comparison (trend)
+    and the window decides which evidence is counted; the cumulative score is
+    not additionally decayed by age.
 """
 from collections import defaultdict
 from contextlib import closing
@@ -15,7 +24,7 @@ from .account_repository import analyzed_content_links
 from .db_access import connect
 from .pipeline import fingerprint
 
-ALGORITHM_VERSION = "interest-v1"
+ALGORITHM_VERSION = "interest-v2"
 WINDOWS = (30, 90, 180)
 BEHAVIOR_WEIGHTS = {"post": 4.0, "comment": 3.0, "reply": 2.0, "repost": 2.0}
 HALF_LIFE_DAYS = 180
@@ -23,7 +32,15 @@ POSITIVE = re.compile(r"喜欢|热爱|推荐|好用|好玩|享受|种草|坚持|
 NEGATIVE = re.compile(r"讨厌|反感|批评|反对|踩坑|避雷|不推荐|无聊|浪费|差评|质疑|抵制|失望|劝退")
 PRACTICE = re.compile(r"我用|我的|实践|经验|教程|对比|参数|路线|装备|实测|拍摄|训练|保养|入手|玩了|去过|做过|每次|通常")
 NEGATION = re.compile(r"(?:不|没|没有|并非|不是)(?:太|很|真|特别)?(?:喜欢|推荐|感兴趣|支持|好用|好玩)")
+TURN = re.compile(r"但|不过|然而|却|只是|可惜|反而")
 UNKNOWN = "时间未知"
+STANCES = ("positive", "negative", "neutral", "mixed", "unclear")
+
+# The most recently finished (or currently started) definition is the active
+# one. Re-analysing an older definition A after B must make A active again.
+ACTIVE_DEFINITION_SQL = """SELECT * FROM interest_topic_definitions WHERE topic_key=?
+    ORDER BY COALESCE(finished_at,started_at,created_at) DESC,
+             created_at DESC, definition_hash DESC LIMIT 1"""
 
 
 def utcnow():
@@ -82,6 +99,37 @@ def _published(value):
         return None
 
 
+def _polarity(clause):
+    if NEGATIVE.search(clause) or NEGATION.search(clause):
+        return "negative"
+    if POSITIVE.search(clause):
+        return "positive"
+    return None
+
+
+def _stance_in_topic_clause(text, matched):
+    """Judge attitude from the clause containing the topic, not the whole text.
+
+    '我喜欢摄影，但讨厌露营' must not make the photography topic negative.
+    An adjacent adversative clause is consulted only when the topic clause
+    expresses no attitude at all.
+    """
+    clauses = [c.strip() for c in re.split(r"[，,；;。！？!?\n]+", text) if c.strip()]
+    index = next((i for i, clause in enumerate(clauses) if _contains(clause, matched)), None)
+    if index is None:
+        return "neutral"
+    stance = _polarity(clauses[index])
+    if stance:
+        return stance
+    for neighbor in (clauses[index - 1] if index else "",
+                     clauses[index + 1] if index + 1 < len(clauses) else ""):
+        if neighbor and TURN.search(neighbor):
+            found = _polarity(neighbor)
+            if found:
+                return found
+    return "neutral"
+
+
 def analyze_text(record, definition):
     """Return literal, verbatim evidence or an explicit non-match/uncertain result."""
     text = record.get("text", "")
@@ -105,9 +153,7 @@ def analyze_text(record, definition):
     quote = text[quote_start:quote_end].strip() or matched
     if matched.casefold() not in quote.casefold():
         quote = text[start:start + len(matched)]
-    negative = NEGATIVE.search(text) or NEGATION.search(text)
-    positive = POSITIVE.search(text) and not NEGATION.search(text)
-    stance = "negative" if negative else "positive" if positive else "neutral"
+    stance = _stance_in_topic_clause(text, matched)
     if len(text.strip()) <= 16 and not PRACTICE.search(text):
         depth = 0.25
     else:
@@ -233,13 +279,32 @@ def _raw_evidence(link, record, analyzed, definition):
     return {"account_key": link["account_key"], "source_hash": link["source_hash"],
             "analysis_key": link["source_hash"],
             "object_type": kind, "content_id": link["content_id"], "platform": link["platform"],
-            "published_at": published.isoformat() if published else None, "published_display": published.isoformat() if published else UNKNOWN,
+            "published_at": published.isoformat() if published else None,
+            "published_display": published.isoformat() if published else UNKNOWN,
             "relevance": analyzed["relevance"], "depth": analyzed["depth"], "quality": quality,
             "stance": analyzed["stance"], "quote": analyzed["quote"], "source_url": record.get("url", ""),
             "root_id": record.get("root_id", ""), "parent_id": record.get("parent_id", ""),
             "full_text": record["text"], "raw_score": raw, "quality_flags": flags,
             "profile_version": definition["profile_version"],
             "review_state": "accepted", "review_note": ""}
+
+
+def _representative_from(evidence, window, now):
+    """Strongest eligible contribution, computed with the same clock as the score."""
+    eligible = []
+    for item in evidence:
+        if item.get("review_state", "accepted") != "accepted":
+            continue
+        published = _published(item.get("published_at"))
+        if window != "all" and (published is None or published < now - timedelta(days=int(window))):
+            continue
+        if item.get("contribution", item["raw_score"]) <= 0:
+            continue
+        eligible.append(item)
+    if not eligible:
+        return None
+    best = max(eligible, key=lambda e: (e.get("contribution", e["raw_score"]), e["raw_score"], e["source_hash"]))
+    return {k: best.get(k) for k in ("source_hash", "quote", "published_display", "source_url", "stance", "relevance")}
 
 
 class InterestService:
@@ -249,24 +314,63 @@ class InterestService:
     def _connect(self, readonly=False):
         return connect(context=self.context, readonly=readonly)
 
+    # ---- one active definition/version for every read path -----------------
+    def _definition_row(self, db, topic):
+        return db.execute(ACTIVE_DEFINITION_SQL, (topic,)).fetchone()
+
+    def _resolve_definition(self, db, topic):
+        row = self._definition_row(db, topic)
+        return json.loads(row["definition_json"]) if row else None
+
+    def _active_version(self, db, topic):
+        definition = self._resolve_definition(db, topic)
+        if definition:
+            return definition["profile_version"]
+        row = db.execute("SELECT profile_version FROM interest_profiles WHERE topic=? ORDER BY updated_at DESC LIMIT 1",
+                         (topic,)).fetchone()
+        return row[0] if row else None
+
+    def _load_evidence(self, db, account_key, topic, version):
+        rows = db.execute("""SELECT id,details_json FROM interest_evidence
+            WHERE account_key=? AND topic=? AND profile_version=? ORDER BY source_hash""",
+                          (account_key, topic, version)).fetchall()
+        return [dict(json.loads(r["details_json"]), id=r["id"]) for r in rows]
+
+    # ---- analysis status lives outside the business transaction -----------
+    def _set_status(self, definition, status, at, error="", stats=None):
+        # Committed separately: a rolled-back analysis must not erase 'failed'.
+        with closing(self._connect()) as db, db:
+            db.execute("""INSERT INTO interest_topic_definitions(
+                topic_key,definition_json,definition_hash,status,created_at,started_at,finished_at,error,stats_json)
+                VALUES (?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(topic_key,definition_hash) DO UPDATE SET status=excluded.status,
+                started_at=CASE WHEN excluded.status='running' THEN excluded.started_at
+                                ELSE interest_topic_definitions.started_at END,
+                finished_at=excluded.finished_at,error=excluded.error,stats_json=excluded.stats_json""",
+                (definition["topic"], json.dumps(definition, ensure_ascii=False), definition["definition_hash"],
+                 status, at, at, None if status == "running" else at, error,
+                 json.dumps(stats or {}, ensure_ascii=False)))
+
     def analyze(self, topic, aliases=None, exclude_terms=None, description="", account_key=None):
         definition = define_topic(topic, aliases, exclude_terms, description)
         now = datetime.now(timezone.utc)
         observed_at = now.isoformat()
-        with closing(self._connect()) as db, db:
-            db.execute("""INSERT INTO interest_topic_definitions(
-                topic_key,definition_json,definition_hash,status,created_at,started_at,finished_at,error,stats_json)
-                VALUES (?,?,?,'running',?,?,NULL,'','{}')
-                ON CONFLICT(topic_key,definition_hash) DO UPDATE SET status='running',started_at=excluded.started_at,
-                finished_at=NULL,error='',stats_json='{}'""",
-                (definition["topic"], json.dumps(definition, ensure_ascii=False), definition["definition_hash"], observed_at, observed_at))
-            if account_key and not db.execute("SELECT 1 FROM accounts WHERE account_key=? AND identity_mode='public_source'", (account_key,)).fetchone():
-                raise ValueError("账号不存在或没有可靠公开身份")
-            keys = [account_key] if account_key else [r[0] for r in db.execute("SELECT account_key FROM accounts WHERE identity_mode='public_source' ORDER BY account_key")]
-            candidate_count = evidence_count = 0
-            try:
+        # Cache key includes the algorithm version so a rules change re-analyses.
+        cache_key = definition["profile_version"]
+        self._set_status(definition, "running", observed_at)
+        try:
+            with closing(self._connect()) as db, db:
+                if account_key and not db.execute(
+                        "SELECT 1 FROM accounts WHERE account_key=? AND identity_mode='public_source'",
+                        (account_key,)).fetchone():
+                    raise ValueError("账号不存在或没有可靠公开身份")
+                keys = [account_key] if account_key else [r[0] for r in db.execute(
+                    "SELECT account_key FROM accounts WHERE identity_mode='public_source' ORDER BY account_key")]
+                candidate_count = evidence_count = 0
                 db.execute("INSERT OR IGNORE INTO interest_profile_versions VALUES (?,?,?)",
-                           (definition["profile_version"], "Verbatim literal rules; independent stance and coverage; capped threads; deterministic saturation", observed_at))
+                           (definition["profile_version"],
+                            "Verbatim literal rules; clause-scoped stance; independent coverage; capped threads; deterministic saturation",
+                            observed_at))
                 for key in keys:
                     rows = _candidate_rows(db, key, definition)
                     candidate_count += len(rows)
@@ -275,7 +379,7 @@ class InterestService:
                         source_hash = link["source_hash"]
                         cached = db.execute("""SELECT decision FROM interest_content_analysis
                             WHERE account_key=? AND topic_key=? AND source_hash=? AND definition_hash=?""",
-                            (key, definition["topic"], source_hash, definition["definition_hash"])).fetchone()
+                            (key, definition["topic"], source_hash, cache_key)).fetchone()
                         if cached:
                             if cached["decision"] == "accepted":
                                 stored = db.execute("""SELECT details_json FROM interest_evidence
@@ -289,10 +393,10 @@ class InterestService:
                                         current.append(_raw_evidence(link, record, analyzed, definition))
                             continue
                         analyzed = analyze_text(record, definition)
-                        analysis_key = fingerprint({"source": source_hash, "definition": definition["definition_hash"], "algorithm": ALGORITHM_VERSION})
+                        analysis_key = fingerprint({"source": source_hash, "definition": cache_key})
                         db.execute("""INSERT OR REPLACE INTO interest_content_analysis(
                             account_key,topic_key,source_hash,definition_hash,analysis_key,decision,details_json,updated_at)
-                            VALUES (?,?,?,?,?,?,?,?)""", (key, definition["topic"], source_hash, definition["definition_hash"], analysis_key,
+                            VALUES (?,?,?,?,?,?,?,?)""", (key, definition["topic"], source_hash, cache_key, analysis_key,
                             analyzed["decision"], json.dumps(analyzed, ensure_ascii=False), observed_at))
                         if analyzed["decision"] == "accepted":
                             current.append(_raw_evidence(link, record, analyzed, definition))
@@ -301,40 +405,46 @@ class InterestService:
                 stats = {"accounts": len(keys), "candidate_contents": candidate_count, "evidence": evidence_count,
                          "empty_public_account_data": not keys}
                 db.execute("""UPDATE interest_topic_definitions SET status='completed',finished_at=?,stats_json=?
-                    WHERE topic_key=? AND definition_hash=?""", (observed_at, json.dumps(stats), definition["topic"], definition["definition_hash"]))
-            except Exception as error:
-                db.execute("""UPDATE interest_topic_definitions SET status='failed',finished_at=?,error=?
-                    WHERE topic_key=? AND definition_hash=?""", (observed_at, str(error)[:500], definition["topic"], definition["definition_hash"]))
-                raise
+                    WHERE topic_key=? AND definition_hash=?""",
+                    (utcnow(), json.dumps(stats, ensure_ascii=False), definition["topic"], definition["definition_hash"]))
+        except Exception as error:
+            self._set_status(definition, "failed", utcnow(), str(error)[:500])
+            raise
         return self.search(definition["topic"], definition=definition)
 
     def _save_profile(self, db, account_key, definition, evidence, now):
-        # Same source+topic is stable; feedback survives deterministic rebuilds.
-        current_version = definition["profile_version"]
+        """Current version wins: one evidence row per (account, topic, source).
+
+        id is always assigned by SQLite. The business key
+        (account_key, topic, analysis_key) is used for upserts, so the same
+        source_hash can be evidence for several topics without a PK collision.
+        """
+        version = definition["profile_version"]
         keep = {item["source_hash"] for item in evidence}
-        for old in db.execute("SELECT id,source_hash FROM interest_evidence WHERE account_key=? AND topic=? AND profile_version=?",
-                              (account_key, definition["topic"], current_version)).fetchall():
+        for old in db.execute("SELECT id,source_hash FROM interest_evidence WHERE account_key=? AND topic=?",
+                              (account_key, definition["topic"])).fetchall():
             if old["source_hash"] not in keep:
                 db.execute("DELETE FROM interest_evidence WHERE id=?", (old["id"],))
         for item in evidence:
-            item.setdefault("id", int(item["source_hash"][:12], 16))
             old = db.execute("""SELECT review_state,review_note FROM interest_evidence
-                WHERE account_key=? AND topic=? AND source_hash=?""", (account_key, definition["topic"], item["source_hash"])).fetchone()
+                WHERE account_key=? AND topic=? AND source_hash=?""",
+                (account_key, definition["topic"], item["source_hash"])).fetchone()
             if old:
                 item.update(review_state=old["review_state"], review_note=old["review_note"])
-            db.execute("""INSERT INTO interest_evidence(id,account_key,topic,analysis_key,source_hash,stance,quote,observed_at,
+            db.execute("""INSERT INTO interest_evidence(account_key,topic,analysis_key,source_hash,stance,quote,observed_at,
                 object_type,published_at,relevance,depth,quality,source_url,quality_flags,details_json,profile_version,review_state,review_note)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(account_key,topic,analysis_key) DO UPDATE SET stance=excluded.stance,quote=excluded.quote,
                 observed_at=excluded.observed_at,object_type=excluded.object_type,published_at=excluded.published_at,
                 relevance=excluded.relevance,depth=excluded.depth,quality=excluded.quality,source_url=excluded.source_url,
                 quality_flags=excluded.quality_flags,details_json=excluded.details_json,profile_version=excluded.profile_version""",
-                (item["id"], account_key, definition["topic"], item["source_hash"], item["source_hash"], item["stance"], item["quote"], now.isoformat(),
+                (account_key, definition["topic"], item["source_hash"], item["source_hash"], item["stance"], item["quote"], now.isoformat(),
                  item["object_type"], item["published_at"], item["relevance"], item["depth"], item["quality"], item["source_url"],
-                 json.dumps(item["quality_flags"], ensure_ascii=False), json.dumps(item, ensure_ascii=False), definition["profile_version"],
+                 json.dumps(item["quality_flags"], ensure_ascii=False), json.dumps(item, ensure_ascii=False), version,
                  item.get("review_state", "accepted"), item.get("review_note", "")))
             stored = db.execute("""SELECT id FROM interest_evidence
-                WHERE account_key=? AND topic=? AND source_hash=?""", (account_key, definition["topic"], item["source_hash"])).fetchone()
+                WHERE account_key=? AND topic=? AND source_hash=? AND profile_version=?""",
+                (account_key, definition["topic"], item["source_hash"], version)).fetchone()
             if stored:
                 item["id"] = stored["id"]
                 db.execute("UPDATE interest_evidence SET details_json=? WHERE id=?",
@@ -358,21 +468,22 @@ class InterestService:
             independent_content_count=excluded.independent_content_count,coverage=excluded.coverage,
             last_activity=excluded.last_activity,details_json=excluded.details_json""",
             (account_key, definition["topic"], metrics["interest_score"], metrics["independent_content_count"], metrics["active_days"],
-             metrics["stance"], metrics["trend"], "兴趣参与强度，不是概率或人格判断；态度与证据充分程度独立展示。",
-             definition["profile_version"], now.isoformat(), metrics["evidence_count"], metrics["independent_content_count"],
+             metrics["stance"], metrics["trend"],
+             "兴趣参与强度，不是概率或人格判断；半衰期用于趋势对比，窗口决定计入证据。",
+             version, now.isoformat(), metrics["evidence_count"], metrics["independent_content_count"],
              metrics["coverage"], metrics["last_activity"], json.dumps(details, ensure_ascii=False)))
 
     def topic_status(self, topic):
         key = normalize_topic(topic)
         with closing(self._connect(readonly=True)) as db:
-            row = db.execute("""SELECT * FROM interest_topic_definitions WHERE topic_key=?
-                ORDER BY created_at DESC,definition_hash DESC LIMIT 1""", (key,)).fetchone()
-        if not row:
-            return {"topic": key, "status": "not_analyzed"}
-        definition = json.loads(row["definition_json"])
-        return {"topic": key, "definition": definition, "status": row["status"],
-                "stats": json.loads(row["stats_json"] or "{}"), "error": row["error"],
-                "started_at": row["started_at"], "finished_at": row["finished_at"]}
+            row = self._definition_row(db, key)
+            if not row:
+                legacy = db.execute("SELECT 1 FROM interest_profiles WHERE topic=? LIMIT 1", (key,)).fetchone()
+                return {"topic": key, "status": "completed" if legacy else "not_analyzed",
+                        "stats": {}, "error": "", "started_at": None, "finished_at": None}
+            return {"topic": key, "definition": json.loads(row["definition_json"]), "status": row["status"],
+                    "stats": json.loads(row["stats_json"] or "{}"), "error": row["error"],
+                    "started_at": row["started_at"], "finished_at": row["finished_at"]}
 
     def search(self, topic, *, min_score=0, platform="", window="all", min_evidence=1, stance="", sort="score",
                limit=20, offset=0, definition=None):
@@ -382,102 +493,102 @@ class InterestService:
         limit, offset = int(limit), int(offset)
         if not 1 <= limit <= 100 or offset < 0 or not 0 <= float(min_score) <= 100 or int(min_evidence) < 0:
             raise ValueError("筛选或分页参数无效")
-        definition = definition or self.topic_status(topic).get("definition")
-        if definition is None:
-            definition = {"topic": normalize_topic(topic)}
-            with closing(self._connect(readonly=True)) as probe:
-                latest = probe.execute("""SELECT d.definition_json,d.status FROM interest_topic_definitions d
-                    WHERE d.topic_key=? ORDER BY d.created_at DESC,d.definition_hash DESC LIMIT 1""", (normalize_topic(topic),)).fetchone()
-                if latest:
-                    definition = json.loads(latest["definition_json"])
-                else:
-                    existing = probe.execute("SELECT profile_version FROM interest_profiles WHERE topic=? ORDER BY updated_at DESC LIMIT 1",
-                                             (normalize_topic(topic),)).fetchone()
-                    if not existing:
-                        return {"topic": normalize_topic(topic), "status": "not_analyzed", "items": [], "total": 0,
-                                "limit": limit, "offset": offset, "message": "该主题尚未分析；不代表没有任何人感兴趣。"}
-                    definition["profile_version"] = existing[0]
-        field = {"score": "interest_score", "recent": "last_activity", "evidence": "evidence_count"}.get(sort)
-        evidence_metric = f"COALESCE(json_extract(p.details_json,'$.windows.{window}.evidence_count'),0)"
-        if not field:
+        if sort not in ("score", "recent", "evidence"):
             raise ValueError("排序仅支持 score/recent/evidence")
-        metric = f"json_extract(p.details_json,'$.windows.{window}.{field}')"
-        where = ["p.topic=?", "p.profile_version=?", "a.identity_mode='public_source'",
-                 f"{evidence_metric}>=?", f"COALESCE({metric},0)>=?"]
-        params = [definition["topic"], definition["profile_version"], int(min_evidence), float(min_score)]
-        if platform:
-            where.append("a.platform=?"); params.append(platform)
-        if stance:
-            if stance not in ("positive", "negative", "neutral", "mixed", "unclear"):
-                raise ValueError("态度筛选无效")
-            where.append(f"json_extract(p.details_json,'$.windows.{window}.stance')=?"); params.append(stance)
-        clause = " AND ".join(where)
+        if stance and stance not in STANCES:
+            raise ValueError("态度筛选无效")
+        key = normalize_topic(topic)
         with closing(self._connect(readonly=True)) as db:
-            total = db.execute(f"SELECT count(*) FROM interest_profiles p JOIN accounts a ON a.account_key=p.account_key WHERE {clause}", params).fetchone()[0]
-            rows = db.execute(f"""SELECT a.account_key,a.platform,a.account_id,a.nickname,a.profile_url,p.*,
-                json_extract(p.details_json,'$.windows.{window}.interest_score') window_score
-                FROM interest_profiles p JOIN accounts a ON a.account_key=p.account_key WHERE {clause}
-                ORDER BY {metric} DESC,p.account_key ASC LIMIT ? OFFSET ?""", params + [limit, offset]).fetchall()
+            active = definition or self._resolve_definition(db, key)
+            if active is None:
+                legacy = db.execute("SELECT profile_version FROM interest_profiles WHERE topic=? ORDER BY updated_at DESC LIMIT 1",
+                                    (key,)).fetchone()
+                if not legacy:
+                    return {"topic": key, "status": "not_analyzed", "items": [], "total": 0,
+                            "limit": limit, "offset": offset, "message": "该主题尚未分析；不代表没有任何人感兴趣。"}
+                active = define_topic(key)
+                active["profile_version"] = legacy[0]
+            version = active["profile_version"]
+            # Static filters stay in SQL; time-dependent metrics are recomputed
+            # with the same clock/metric function used by the evidence detail.
+            where = ["p.topic=?", "p.profile_version=?", "a.identity_mode='public_source'"]
+            params = [key, version]
+            if platform:
+                where.append("a.platform=?"); params.append(platform)
+            rows = db.execute(f"""SELECT a.account_key,a.platform,a.account_id,a.nickname,a.profile_url,
+                p.topic,p.profile_version,p.updated_at,p.details_json
+                FROM interest_profiles p JOIN accounts a ON a.account_key=p.account_key
+                WHERE {" AND ".join(where)} ORDER BY p.account_key""", params).fetchall()
+            now = datetime.now(timezone.utc)
             items = []
             for row in rows:
+                evidence = self._load_evidence(db, row["account_key"], key, version)
+                metrics = _metrics(evidence, now, window)
+                if metrics["interest_score"] < float(min_score):
+                    continue
+                if metrics["evidence_count"] < int(min_evidence):
+                    continue
+                if stance and metrics["stance"] != stance:
+                    continue
                 details = json.loads(row["details_json"])
-                item = {"account_key": row["account_key"], "platform": row["platform"], "account_id": row["account_id"],
-                        "nickname": row["nickname"], "profile_url": row["profile_url"], "topic": row["topic"],
-                        **details["windows"][window], "interest_score": int(row["window_score"] or 0),
-                        "profile_version": row["profile_version"], "updated_at": row["updated_at"], "synthetic": details.get("synthetic", False)}
-                item["representative_evidence"] = self._representative(db, row["account_key"], row["topic"], window, row["profile_version"])
+                item = {"account_key": row["account_key"], "platform": row["platform"],
+                        "account_id": row["account_id"], "nickname": row["nickname"],
+                        "profile_url": row["profile_url"], "topic": key, **metrics,
+                        "profile_version": row["profile_version"], "updated_at": row["updated_at"],
+                        "synthetic": details.get("synthetic", False)}
+                item["representative_evidence"] = _representative_from(evidence, window, now)
                 items.append(item)
-        status = self.topic_status(definition["topic"])
-        return {"topic": definition["topic"], "definition": definition, "status": status["status"],
+            if sort == "score":
+                items.sort(key=lambda i: (i["interest_score"], i["evidence_count"], i["account_key"]), reverse=True)
+            elif sort == "evidence":
+                items.sort(key=lambda i: (i["evidence_count"], i["interest_score"], i["account_key"]), reverse=True)
+            else:
+                items.sort(key=lambda i: (i["last_activity"] or "", i["interest_score"], i["account_key"]), reverse=True)
+            total = len(items)
+            items = items[offset:offset + limit]
+        status = self.topic_status(key)
+        return {"topic": key, "definition": active, "status": status["status"],
                 "analysis": status, "items": items, "total": total, "limit": limit, "offset": offset,
                 "message": "已分析，当前条件下无匹配结果。" if not items else ""}
 
-    def _representative(self, db, account_key, topic, window="all", profile_version=None):
-        if profile_version is None:
-            row = db.execute("SELECT profile_version FROM interest_profiles WHERE account_key=? AND topic=? ORDER BY updated_at DESC LIMIT 1",
-                             (account_key, topic)).fetchone()
-            profile_version = row[0] if row else ""
-        rows = db.execute("SELECT details_json FROM interest_evidence WHERE account_key=? AND topic=? AND profile_version=? AND review_state='accepted'",
-                          (account_key, topic, profile_version)).fetchall()
-        evidence = [json.loads(r[0]) for r in rows]
-        metric = _metrics(evidence, datetime.now(timezone.utc), window)
-        # Select strongest eligible evidence without mutating persisted values.
-        eligible = [e for e in evidence if window == "all" or (_published(e.get("published_at")) and
-                    _published(e["published_at"]) >= datetime.now(timezone.utc) - timedelta(days=int(window)))]
-        if not eligible or not metric["evidence_count"]:
-            return None
-        best = max(eligible, key=lambda e: (e["raw_score"], e["source_hash"]))
-        return {k: best.get(k) for k in ("source_hash", "quote", "published_display", "source_url", "stance", "relevance")}
-
     def account(self, account_key):
         with closing(self._connect(readonly=True)) as db:
-            account = db.execute("SELECT * FROM accounts WHERE account_key=? AND identity_mode='public_source'", (account_key,)).fetchone()
+            account = db.execute("SELECT * FROM accounts WHERE account_key=? AND identity_mode='public_source'",
+                                 (account_key,)).fetchone()
             if not account:
                 return None
             from .account_repository import account_overview, attribution_conflicts
             overview = account_overview(db, account_key)
             overview.pop("history", None)
-            rows = db.execute("""SELECT * FROM interest_profiles WHERE account_key=? ORDER BY updated_at DESC,profile_version DESC""", (account_key,)).fetchall()
+            rows = db.execute("SELECT * FROM interest_profiles WHERE account_key=? ORDER BY updated_at DESC,profile_version DESC",
+                              (account_key,)).fetchall()
             latest = {}
             for row in rows:
+                if self._active_version(db, row["topic"]) != row["profile_version"]:
+                    continue
                 latest.setdefault(row["topic"], row)
+            now = datetime.now(timezone.utc)
             interests = []
             for row in latest.values():
+                evidence = self._load_evidence(db, account_key, row["topic"], row["profile_version"])
+                windows = {str(w): _metrics(evidence, now, w) for w in WINDOWS}
+                windows["all"] = _metrics(evidence, now)
                 details = json.loads(row["details_json"])
-                interests.append({"topic": row["topic"], **details["windows"]["all"],
-                                  "windows": details["windows"], "profile_version": row["profile_version"],
-                                  "updated_at": row["updated_at"], "synthetic": details.get("synthetic", False)})
+                interests.append({"topic": row["topic"], **windows["all"], "windows": windows,
+                                  "profile_version": row["profile_version"], "updated_at": row["updated_at"],
+                                  "synthetic": details.get("synthetic", False)})
             interests.sort(key=lambda p: (p["coverage"] == "high", p["interest_score"], p["evidence_count"], p["topic"]), reverse=True)
             return {**overview, "interests": interests, "attribution_conflicts": attribution_conflicts(db, account_key=account_key),
                     "scope_note": "仅基于已采集且有可靠公开账号 ID 的内容；未观测不等于没有兴趣。"}
 
     def evidence(self, account_key, topic, window="all"):
+        if window not in ("all", "30", "90", "180", 30, 90, 180):
+            raise ValueError("时间窗口仅支持 30/90/180/all")
+        window = str(window)
         key = normalize_topic(topic)
         with closing(self._connect(readonly=True)) as db:
-            rows = db.execute("""SELECT e.id,e.details_json FROM interest_evidence e
-                JOIN interest_profiles p ON p.account_key=e.account_key AND p.topic=e.topic AND p.profile_version=e.profile_version
-                WHERE e.account_key=? AND e.topic=? ORDER BY p.updated_at DESC,e.source_hash""", (account_key, key)).fetchall()
-            evidence = [dict(json.loads(r["details_json"]), id=r["id"]) for r in rows]
+            version = self._active_version(db, key)
+            evidence = self._load_evidence(db, account_key, key, version) if version else []
         now = datetime.now(timezone.utc)
         metrics = _metrics(evidence, now, window)
         visible = []
@@ -486,9 +597,10 @@ class InterestService:
             if window != "all" and (published is None or published < now - timedelta(days=int(window))):
                 continue
             visible.append(item)
-        visible.sort(key=lambda e: (e.get("review_state") == "accepted", e["raw_score"], e["source_hash"]), reverse=True)
+        visible.sort(key=lambda e: (e.get("review_state", "accepted") == "accepted",
+                                   e.get("contribution", 0), e["raw_score"], e["source_hash"]), reverse=True)
         return {"account_key": account_key, "topic": key, **metrics, "items": visible,
-                "score_note": "兴趣参与指数不是概率；分数由行为、相关性、深度、质量、时间和独立证据共同计算。"}
+                "score_note": "兴趣参与指数不是概率或正向好感；它是窗口内独立证据贡献的确定性映射。半衰期用于趋势对比，窗口决定计入哪些证据；态度与证据充分程度单独展示。"}
 
     def feedback(self, evidence_id, action, note=""):
         if action not in ("irrelevant", "stance_error", "attribution_question", "restore"):
@@ -500,13 +612,18 @@ class InterestService:
             row = db.execute("SELECT * FROM interest_evidence WHERE id=?", (int(evidence_id),)).fetchone()
             if not row:
                 raise ValueError("兴趣证据不存在")
-            db.execute("UPDATE interest_evidence SET review_state=?,review_note=? WHERE id=?", (state, note, int(evidence_id)))
+            version = self._active_version(db, row["topic"])
+            if version is None or row["profile_version"] != version:
+                raise ValueError("证据不属于当前画像版本，请重新分析该主题")
+            definition = self._resolve_definition(db, row["topic"]) or define_topic(row["topic"])
+            definition = dict(definition, profile_version=version)
+            db.execute("UPDATE interest_evidence SET review_state=?,review_note=? WHERE id=?",
+                       (state, note, int(evidence_id)))
             item = json.loads(row["details_json"])
             item.update(review_state=state, review_note=note)
-            db.execute("UPDATE interest_evidence SET details_json=? WHERE id=?", (json.dumps(item, ensure_ascii=False), int(evidence_id)))
-            definition = self.topic_status(row["topic"])["definition"]
-            evidence = [json.loads(r[0]) for r in db.execute("SELECT details_json FROM interest_evidence WHERE account_key=? AND topic=?",
-                        (row["account_key"], row["topic"]))]
+            db.execute("UPDATE interest_evidence SET details_json=? WHERE id=?",
+                       (json.dumps(item, ensure_ascii=False), int(evidence_id)))
+            evidence = self._load_evidence(db, row["account_key"], row["topic"], version)
             self._save_profile(db, row["account_key"], definition, evidence, datetime.now(timezone.utc))
         return self.account(row["account_key"])
 

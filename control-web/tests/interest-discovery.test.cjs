@@ -67,6 +67,18 @@ test('discovery shows existing data status and avoids automatic analysis', async
   assert.equal(calls.some(u => u.startsWith('/api/interests/search?') || u === '/api/interests/analyze'), false)
 })
 
+test('analysis re-queries with the currently selected filters', async () => {
+  const view = render(React.createElement(App))
+  fireEvent.click(await screen.findByRole('button', { name: '人物发现' }))
+  fireEvent.change(await screen.findByPlaceholderText('如：胶片摄影、徒步露营、古典音乐'), { target: { value: '胶片摄影' } })
+  const scoreInput = view.container.querySelector('input[type="number"]')
+  assert.ok(scoreInput)
+  fireEvent.change(scoreInput, { target: { value: '40' } })
+  fireEvent.click(screen.getByRole('button', { name: '分析已有数据' }))
+  await waitFor(() => assert.ok(calls.some(u => u.startsWith('/api/interests/search?') && u.includes('min_score=40'))))
+  assert.ok(await screen.findByText('公开账号甲'))
+})
+
 test('topic input flows through results, profile, evidence and feedback', async () => {
   render(React.createElement(App))
   fireEvent.click(await screen.findByRole('button', { name: '人物发现' }))

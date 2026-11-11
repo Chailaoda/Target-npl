@@ -125,8 +125,13 @@ export default function InterestDiscovery({ api }: { api: Api }) {
       const data = await api<SearchResult>('/api/interests/analyze', {
         topic: topic.trim(), aliases: aliases.split(/[,，]/).map(v => v.trim()).filter(Boolean), description
       })
-      setResult(data); setOffset(0)
-      setNotice(data.analysis?.stats?.empty_public_account_data ? '当前没有可靠公开账号 ID 的内容；未生成虚构人物画像。' : '分析完成，可继续调整条件筛选，不会重新调用模型。')
+      const message = data.analysis?.stats?.empty_public_account_data
+        ? '当前没有可靠公开账号 ID 的内容；未生成虚构人物画像。'
+        : '分析完成，已按当前筛选条件重新查询，不会重新调用模型。'
+      // The analyze endpoint returns its own unfiltered snapshot; re-query with
+      // the current threshold/platform/window/stance so the list stays honest.
+      await search(0)
+      setNotice(message)
     } catch (e) { setError(e instanceof Error ? e.message : '分析失败') }
     finally { setBusy(false) }
   }

@@ -1,6 +1,7 @@
 """The only business database resolver. Ordinary connects never run DDL."""
 from __future__ import annotations
 
+from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
@@ -12,6 +13,13 @@ from .runtime_context import RuntimeContext, RuntimeErrorBase, current_context
 V2_TABLES = ("v2_sources", "v2_policies", "v2_observations", "v2_jobs", "v2_tasks", "v2_analyses", "v2_reviews", "v2_review_history", "v2_attempts")
 LEGACY_TABLES = ("sources", "profiles", "evaluations", "runs", "run_annotations")
 ACCOUNT_TABLES = ("accounts", "account_profile_history", "account_content_links", "interest_evidence", "interest_profiles", "interest_profile_versions", "account_attribution_conflicts")
+# WP4 adds two tables and extends two legacy interest tables. A WP3 database
+# without them would pass the old preflight and fail only during analysis.
+WP4_TABLES = ("interest_topic_definitions", "interest_content_analysis")
+WP4_COLUMNS = {
+    "interest_evidence": {"source_hash", "profile_version", "review_state", "review_note", "details_json"},
+    "interest_profiles": {"evidence_count", "independent_content_count", "coverage", "last_activity", "details_json"},
+}
 V2_SCHEMA = """
 CREATE TABLE IF NOT EXISTS v2_sources(source_hash TEXT PRIMARY KEY, object_key TEXT NOT NULL, source_json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS v2_policies(policy_hash TEXT PRIMARY KEY, policy_json TEXT NOT NULL);
@@ -57,6 +65,12 @@ def _schema_state(db):
     columns = {r[1] for r in db.execute("PRAGMA table_info(v2_jobs)")}
     if not {"task_json", "config_revision"} <= columns or not set(ACCOUNT_TABLES) <= tables:
         return "migration_required"
+    if not set(WP4_TABLES) <= tables:
+        return "migration_required"
+    for table, required in WP4_COLUMNS.items():
+        present = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+        if not required <= present:
+            return "migration_required"
     return "migrated"
 
 
@@ -67,7 +81,7 @@ def preflight_db(context=None):
     if path.stat().st_size == 0:
         raise RuntimeErrorBase("DB_EMPTY_FILE", str(path))
     try:
-        with _open(path, readonly=True) as db:
+        with closing(_open(path, readonly=True)) as db:
             if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 raise RuntimeErrorBase("DB_INVALID_SQLITE", str(path))
             tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -98,7 +112,7 @@ def connect(path=None, *, readonly=False, context=None):
         if not readonly and not resolved.is_file():
             raise RuntimeErrorBase("DB_MISSING", str(resolved))
         if not readonly:
-            with _open(resolved, readonly=True) as probe:
+            with closing(_open(resolved, readonly=True)) as probe:
                 if _schema_state(probe) != "migrated":
                     raise RuntimeErrorBase("DB_SCHEMA_NOT_READY", str(resolved))
     if readonly:
