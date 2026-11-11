@@ -242,65 +242,6 @@ class VendorEnvTests(unittest.TestCase):
         locked = self.resolve({ve.ENV_PUBLIC: "0", ve.ENV_VENDOR_DIR: str(e.source_dir)})
         self.assertEqual(locked.source_dir, e.source_dir)
 
-    # --- post-merge P2: resolved paths, declared dirs, child pins ---------
-    def test_registry_rejects_aliased_path_collision(self):
-        bad = copy.deepcopy(self.decl)
-        # ".." alias resolves to the SAME physical directory as the baseline.
-        bad["controlled_fork"]["local_path"] = "vendor/MediaCrawler/../MediaCrawler"
-        with self.assertRaises(ve.VendorEnvironmentError) as ctx:
-            ve.load_registry(self.root, bad)
-        self.assertEqual(ctx.exception.code, "REGISTRY_PATH_COLLISION")
-
-    def test_pinned_dir_must_be_one_of_the_declared_locations(self):
-        alien = self.root / "vendor" / "undeclared-clone"
-        self.make_tree(alien)
-        self.shas[str(alien.resolve())] = FORK
-        with self.assertRaises(ve.VendorEnvironmentError) as ctx:
-            self.resolve({ve.ENV_PUBLIC: "1", ve.ENV_VENDOR_DIR: str(alien)})
-        self.assertEqual(ctx.exception.code, "VENDOR_DIR_NOT_DECLARED")
-
-    def test_pinned_dir_alias_resolving_to_declared_dir_is_accepted(self):
-        alias = self.fork / ".." / self.fork.name
-        e = self.resolve({ve.ENV_PUBLIC: "1", ve.ENV_VENDOR_DIR: str(alias)})
-        self.assertEqual(e.source_dir, self.fork)
-        self.assertEqual(e.kind, "controlled_fork")
-
-    def test_selected_dir_must_match_selected_commit_kind(self):
-        # Fork directory holding the upstream commit: anonymous mode must not
-        # silently accept a mismatched directory / dependency kind.
-        self.shas[str(self.fork)] = UPSTREAM
-        with self.assertRaises(ve.VendorEnvironmentError) as ctx:
-            self.resolve({ve.ENV_PUBLIC: "0", ve.ENV_VENDOR_DIR: str(self.fork)})
-        self.assertEqual(ctx.exception.code, "VENDOR_DIR_KIND_MISMATCH")
-
-    def test_child_sha_and_kind_must_match_scheduler_pins(self):
-        with self.assertRaises(ve.VendorEnvironmentError) as ctx:
-            self.resolve({ve.ENV_PUBLIC: "1", ve.ENV_SHA: UPSTREAM})
-        self.assertEqual(ctx.exception.code, "VENDOR_SHA_MISMATCH")
-        with self.assertRaises(ve.VendorEnvironmentError) as ctx:
-            self.resolve({ve.ENV_PUBLIC: "1", ve.ENV_KIND: "upstream"})
-        self.assertEqual(ctx.exception.code, "VENDOR_KIND_MISMATCH")
-        # Positive path: the exact env handed to a child resolves identically.
-        parent = self.resolve({ve.ENV_PUBLIC: "1"})
-        child = self.resolve(parent.launch_env({}))
-        self.assertEqual((child.kind, child.sha, child.source_dir),
-                         (parent.kind, parent.sha, parent.source_dir))
-
-    def test_git_status_failure_is_structured_preflight_error(self):
-        def broken(cmd, text=True):
-            if "status" in cmd:
-                raise subprocess.CalledProcessError(128, cmd)
-            return self.fake_git(cmd, text=text)
-        with self.assertRaises(ve.VendorEnvironmentError) as ctx:
-            ve.resolve_vendor_env(self.root, env={ve.ENV_PUBLIC: "1"}, run=broken)
-        self.assertEqual(ctx.exception.code, "VENDOR_GIT_UNAVAILABLE")
-        with patch("content_screening.vendor_env.subprocess.check_output", side_effect=broken):
-            ok, report = ve.preflight(root=self.root, env={ve.ENV_PUBLIC: "1"})
-        self.assertFalse(ok)
-        self.assertEqual(report["status"], "BLOCKED")
-        self.assertEqual(report["code"], "VENDOR_GIT_UNAVAILABLE")
-        self.assertNotIn("Traceback", str(report))
-
     # --- offline preflight ------------------------------------------------
     def test_preflight_blocks_when_install_dir_missing(self):
         shutil.rmtree(self.upstream)

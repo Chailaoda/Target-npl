@@ -41,6 +41,8 @@ def live(service,run_id):
     if not dataset and pointer.exists():dataset=json.loads(pointer.read_text(encoding='utf-8')).get('dataset_id')
     captured=deque(maxlen=200);captured_total=0;collection={}
     sources=[]
+    from .db_access import resolve_db
+    from .runtime_context import current_context
     if dataset and re.fullmatch(r'\d{8}T\d{12}Z',dataset):
         source=service.root/'data/collections'/dataset
         checkpoint=source/'checkpoint.json'
@@ -113,7 +115,7 @@ def live(service,run_id):
             captured.append({'id':f'{platform}:{kind}:{cid}','platform':platform,'kind':kind,'text':str(text or '')[:2000],'keyword':row.get('keyword',''),'published_at':str(published or '')})
     job_id=state.get('analysis_job_id') or state.get('result',{}).get('job_id')
     candidates=[];processed=0;review=0
-    db_path=service.root/'data/screening.sqlite3'
+    db_path=resolve_db()
     if job_id and db_path.exists():
         import sqlite3
         from .workflow import projected_items

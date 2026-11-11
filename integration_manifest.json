@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "base_commit": "4271d3fc6dd08c9cdc7ba5847ccc380f3ad5c99c",
+  "integration_head": "3bde1e227bdc93f9a170bb880bce75b2021e5581",
+  "service": "target-npl-rule-control",
+  "protocol_version": 2,
+  "backend_package": "content_screening",
+  "instance_binding": "4bef3b0b82258250502ded70d81e8334eeec474048631a292e8c50ae57f2de1c",
+  "build_digest": "dd1fd9769f7cf3782bbb7d1502b4f086c8d2e972959739027ede65eaf75b3024",
+  "file_count": 48,
+  "frozen_at": "2026-11-11T04:02:50Z",
+  "path_normalization": "relative POSIX, UTF-8 byte order, raw SHA256 lowercase",
+  "excluded": [
+    ".git",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "integration_manifest.json",
+    "runtime outputs"
+  ],
+  "release_identity": {
+    "build_digest": "dd1fd9769f7cf3782bbb7d1502b4f086c8d2e972959739027ede65eaf75b3024"
+  },
+  "manifest_digest": "98b0de03dde32e62a585ba2d1f856f47c8757371f67510ed4050f4708ccc90a3"
+}

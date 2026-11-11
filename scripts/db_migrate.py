@@ -1,58 +1,39 @@
-"""Incremental DB migration for the public-account-profiles upgrade (WP3).
-
-Forward:  creates account/interest tables (all IF NOT EXISTS — safe to rerun).
-Rollback: drops the new tables only; v2_* tables and all legacy data are never
-touched by either direction, so the previous code version keeps working on a
-migrated database (new tables are transparent to it).
-
-Usage:
-  python scripts/db_migrate.py [--db data/screening.sqlite3] [--rollback]
-"""
+"""Explicit migration / read-only preflight for the isolated unified DB."""
 import argparse
-import sqlite3
-import sys
+import hashlib
+import json
 from pathlib import Path
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from content_screening.account_repository import SCHEMA, migrate  # noqa: E402
-
-NEW_TABLES = ("accounts", "account_profile_history", "account_content_links",
-              "interest_evidence", "interest_profiles", "interest_profile_versions",
-              "account_attribution_conflicts")
-
-
-def rollback(db):
-    for table in NEW_TABLES:
-        db.execute(f"DROP TABLE IF EXISTS {table}")
-    db.execute("DROP INDEX IF EXISTS idx_content_links_source")
-    db.execute("DROP INDEX IF EXISTS idx_evidence_account_topic")
+from content_screening.runtime_context import RuntimeContext, RuntimeErrorBase  # noqa: E402
+from content_screening.db_access import migrate, preflight_db, resolve_db  # noqa: E402
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--db", default=str(ROOT / "data/screening.sqlite3"))
-    parser.add_argument("--rollback", action="store_true")
+    parser.add_argument("--deployment")
+    parser.add_argument("--preflight", action="store_true")
+    parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--yes-really-migrate", action="store_true")
     args = parser.parse_args()
-    db = sqlite3.connect(args.db)
     try:
-        if args.rollback:
-            with db:
-                rollback(db)
-            print("回滚完成：已删除新增账号/画像表；v2_* 原表未动。")
-        else:
-            with db:
-                migrate(db)
-            present = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
-            missing = [t for t in NEW_TABLES if t not in present]
-            if missing:
-                raise RuntimeError(f"迁移后仍缺表: {missing}")
-            print("迁移完成：账号/画像表就绪（幂等，可重复执行）。")
-    finally:
-        db.close()
-    return 0
+        context = RuntimeContext.load(args.deployment)
+        path = resolve_db(context)
+        if args.preflight:
+            print(json.dumps({"status": "PASS", "schema_state": preflight_db(context), "db": str(path)}, ensure_ascii=False))
+            return 0
+        if not args.apply or not args.yes_really_migrate:
+            raise RuntimeErrorBase("DB_MIGRATION_NOT_AUTHORISED", "migration requires --apply --yes-really-migrate")
+        state = migrate(context)
+        print(json.dumps({"status": "PASS", "schema_state": state, "db": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}, ensure_ascii=False))
+        return 0
+    except RuntimeErrorBase as error:
+        print(json.dumps({"status": "BLOCKED", "code": error.code, "error": str(error)}, ensure_ascii=False), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

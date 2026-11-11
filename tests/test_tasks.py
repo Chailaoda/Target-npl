@@ -14,12 +14,12 @@ import threading
 import urllib.request
 import urllib.error
 
-from content_screening.control_server import RuleStore,Conflict
-from content_screening.task_service import TaskService
-from content_screening.task_contract import default_task,apply_scope,apply_patch
-from content_screening.agent_mcp import AgentTools,dispatch
-from content_screening.task_worker import execute
-from content_screening.task_schema import task_schema
+from festival_match.control_server import RuleStore,Conflict
+from festival_match.task_service import TaskService
+from festival_match.task_contract import default_task,apply_scope,apply_patch
+from festival_match.agent_mcp import AgentTools,dispatch
+from festival_match.task_worker import execute
+from festival_match.task_schema import task_schema
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -29,7 +29,7 @@ class TaskTests(unittest.TestCase):
         (ROOT/'tmp/tests').mkdir(parents=True,exist_ok=True)
         temp=tempfile.TemporaryDirectory(dir=ROOT/'tmp/tests');self.addCleanup(temp.cleanup);self.root=Path(temp.name)
         for folder in ('profiles','config'):(self.root/folder).mkdir()
-        for file in ('profiles/default.json','config/collection.json'):(self.root/file).write_bytes((ROOT/file).read_bytes())
+        for file in ('profiles/music_festival_v2.json','config/collection.json'):(self.root/file).write_bytes((ROOT/file).read_bytes())
         self.store=RuleStore(self.root);self.service=TaskService(self.store)
 
     def test_agent_apply_human_tuning_and_protection(self):
@@ -45,24 +45,24 @@ class TaskTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'不能删除'):self.service.apply(agent,newer['etag'])
 
     def test_first_manual_task_save_locks_scope_even_from_legacy_bundle(self):
-        initial=self.service.get();bundle=initial['bundle'];bundle['task']['scope']['locations']=['示例城市甲']
+        initial=self.service.get();bundle=initial['bundle'];bundle['task']['scope']['locations']=['成都']
         saved=self.store.save(bundle,initial['etag'])
         self.assertIn('/task/scope/locations',saved['bundle']['task']['human_overrides'])
-        modified=copy.deepcopy(saved['bundle']);modified['task']['scope']['locations']=['示例城市乙']
+        modified=copy.deepcopy(saved['bundle']);modified['task']['scope']['locations']=['北京']
         with self.assertRaisesRegex(ValueError,'人工锁定'):self.service.apply(modified,saved['etag'])
 
     def test_goal_compiler_uses_latest_state_and_does_not_auto_apply(self):
         initial=self.service.get();before=copy.deepcopy(initial)
         def compiler(goal,bundle,caps):
             self.assertFalse(caps['native_location_filter'])
-            candidate=copy.deepcopy(bundle);candidate['task']['scope']['locations']=['示例城市甲'];candidate['task']['scope']['recent_days']=30
+            candidate=copy.deepcopy(bundle);candidate['task']['scope']['locations']=['成都'];candidate['task']['scope']['recent_days']=30
             candidate['task']['assumptions']=['最近按近30天，地域与时间均在后处理检查']
             return candidate,{'total_tokens':100}
-        plan=self.service.plan('找示例城市甲示例活动同行',initial['etag'],compiler)
-        self.assertTrue(plan['can_apply']);self.assertEqual(plan['bundle']['task']['scope']['locations'],['示例城市甲'])
+        plan=self.service.plan('找成都音乐节同行',initial['etag'],compiler)
+        self.assertTrue(plan['can_apply']);self.assertEqual(plan['bundle']['task']['scope']['locations'],['成都'])
         self.assertEqual(self.service.get(),before)
         self.service.apply(plan['bundle'],plan['base_etag'])
-        self.assertEqual(self.service.get()['bundle']['task']['description'],'找示例城市甲示例活动同行')
+        self.assertEqual(self.service.get()['bundle']['task']['description'],'找成都音乐节同行')
 
     def test_patch_validation_and_human_locked_fields(self):
         initial=self.service.get()
@@ -73,27 +73,27 @@ class TaskTests(unittest.TestCase):
 
     def test_one_goal_submit_plans_applies_and_runs_only_once(self):
         initial=self.service.get();proposal=copy.deepcopy(initial['bundle'])
-        proposal['task']['scope']['locations']=['示例城市甲']
+        proposal['task']['scope']['locations']=['成都']
         queued={'run_id':'a'*32,'status':'queued'}
-        with patch('content_screening.task_planner.compile_goal',return_value=(proposal,{'total_tokens':1})) as compiler,patch.object(self.service,'run',return_value=queued) as start:
-            first=self.service.submit('找示例城市甲示例活动搭子',initial['etag'],'same-request')
-            second=self.service.submit('找示例城市甲示例活动搭子',initial['etag'],'same-request')
+        with patch('festival_match.task_planner.compile_goal',return_value=(proposal,{'total_tokens':1})) as compiler,patch.object(self.service,'run',return_value=queued) as start:
+            first=self.service.submit('找成都音乐节搭子',initial['etag'],'same-request')
+            second=self.service.submit('找成都音乐节搭子',initial['etag'],'same-request')
         self.assertEqual(first['status'],'submitted');self.assertEqual(second,first)
         self.assertEqual(compiler.call_count,1);self.assertEqual(start.call_count,1)
-        self.assertEqual(self.service.get()['bundle']['task']['scope']['locations'],['示例城市甲'])
+        self.assertEqual(self.service.get()['bundle']['task']['scope']['locations'],['成都'])
         self.assertEqual(self.service.get()['bundle']['task']['human_overrides'],[])
         with self.assertRaises(ValueError):self.service.submit('不同目标',initial['etag'],'same-request')
 
     def test_source_filters_not_faked_and_own_timestamp_not_parent_timestamp(self):
-        task=default_task(self.service.get()['bundle']);task['scope'].update(locations=['示例城市甲'],recent_days=30)
+        task=default_task(self.service.get()['bundle']);task['scope'].update(locations=['成都'],recent_days=30)
         now=datetime.now(timezone.utc)
         base={'accepted':True,'score':90,'evidence_level':'explicit','reason':'自述','promotion':'no'}
         record={'text':'找搭子','published_at':now.isoformat()}
-        out=apply_scope(base,record,[{'text':'示例城市甲示例活动'}],task,now.isoformat())
+        out=apply_scope(base,record,[{'text':'成都音乐节'}],task,now.isoformat())
         self.assertTrue(out['accepted']);self.assertEqual(out['scope_check']['status'],'matched')
-        record['published_at']='';out=apply_scope(base,record,[{'text':'示例城市甲示例活动'}],task,now.isoformat())
+        record['published_at']='';out=apply_scope(base,record,[{'text':'成都音乐节'}],task,now.isoformat())
         self.assertFalse(out['accepted']);self.assertEqual(out['scope_check']['status'],'unknown')
-        record['published_at']=(now-timedelta(days=60)).isoformat();out=apply_scope(base,record,[{'text':'示例城市甲示例活动'}],task,now.isoformat())
+        record['published_at']=(now-timedelta(days=60)).isoformat();out=apply_scope(base,record,[{'text':'成都音乐节'}],task,now.isoformat())
         self.assertEqual(out['scope_check']['status'],'excluded')
         self.assertTrue(base['accepted'])
 
@@ -107,16 +107,16 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(res['bundle']['task']['execution']['max_api_calls'],50)
 
     def test_planner_uses_typed_patch_values_and_accepts_description_metadata(self):
-        from content_screening.task_planner import compile_goal
+        from festival_match.task_planner import compile_goal
         config=json.loads((ROOT/'config/connection.json').read_text(encoding='utf-8-sig'))
         changes=[{'op':'replace','path':'/task/description','value':'新目标'},
-                 {'op':'replace','path':'/task/scope/locations','value':['示例城市甲']},
-                 {'op':'replace','path':'/policy/topic_patterns','value':[r'示例活动\s*现场']}]
+                 {'op':'replace','path':'/task/scope/locations','value':['成都']},
+                 {'op':'replace','path':'/policy/topic_patterns','value':[r'音乐节\s*现场']}]
         envelope={'choices':[{'finish_reason':'tool_calls','message':{'tool_calls':[{'function':{'name':'draft_screening_task','arguments':json.dumps({'changes':changes,'assumptions':[],'unresolved':[]},ensure_ascii=False)}}]}}],'usage':{'total_tokens':10}}
-        with patch('content_screening.task_planner.ROOT',self.root),patch('content_screening.task_planner.load_connection',return_value=config),patch('content_screening.task_planner.read_key',return_value='not-a-real-key'),patch('content_screening.task_planner.request',return_value=(json.dumps(envelope).encode(),{})):
+        with patch('festival_match.task_planner.ROOT',self.root),patch('festival_match.task_planner.load_connection',return_value=config),patch('festival_match.task_planner.read_key',return_value='not-a-real-key'),patch('festival_match.task_planner.request',return_value=(json.dumps(envelope).encode(),{})):
             bundle,usage=compile_goal('测试目标',self.service.get()['bundle'],{})
-        self.assertEqual(bundle['task']['scope']['locations'],['示例城市甲'])
-        self.assertEqual(bundle['policy']['topic_patterns'],[r'示例活动\s*现场'])
+        self.assertEqual(bundle['task']['scope']['locations'],['成都'])
+        self.assertEqual(bundle['policy']['topic_patterns'],[r'音乐节\s*现场'])
         self.assertEqual(usage['total_tokens'],10)
 
     def test_mcp_tools_and_parameter_boundary(self):
@@ -130,11 +130,11 @@ class TaskTests(unittest.TestCase):
         with self.assertRaises(ValueError):tools.call('screening_task_run',{'revision':'baseline','request_id':'test','spawn':False})
 
     def test_http_plan_draft_tracks_only_actual_human_tuning(self):
-        from content_screening.control_server import make_server
+        from festival_match.control_server import make_server
         initial=self.service.get()
         def compiler(goal,bundle,caps):
-            bundle=copy.deepcopy(bundle);bundle['task']['scope']['locations']=['示例城市甲'];return bundle,{}
-        plan=self.service.plan('测试示例城市甲范围',initial['etag'],compiler)
+            bundle=copy.deepcopy(bundle);bundle['task']['scope']['locations']=['成都'];return bundle,{}
+        plan=self.service.plan('测试成都范围',initial['etag'],compiler)
         server=make_server(0,self.store);threading.Thread(target=server.serve_forever,daemon=True).start()
         self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
         url=f'http://127.0.0.1:{server.server_port}';opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -152,11 +152,11 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(error.exception.code,400)
 
     def test_end_to_end_snapshot_execution_idempotency_and_results(self):
-        initial=self.service.get();bundle=initial['bundle'];bundle['task']['execution']['mode']='rules';bundle['task']['scope']['locations']=['示例城市甲']
+        initial=self.service.get();bundle=initial['bundle'];bundle['task']['execution']['mode']='rules';bundle['task']['scope']['locations']=['成都']
         saved=self.service.apply(bundle,initial['etag'])
         dataset_id='20261029T200000000000Z';dataset=self.root/'data/collections'/dataset_id;dataset.mkdir(parents=True)
-        rows=[{'platform':'douyin','content_id':'1','text':'我喜欢示例城市甲示例活动，找搭子','published_at':datetime.now(timezone.utc).isoformat(),'synthetic':True},
-              {'platform':'douyin','content_id':'2','text':'我喜欢示例城市乙示例活动，找搭子','published_at':datetime.now(timezone.utc).isoformat(),'synthetic':True}]
+        rows=[{'platform':'douyin','content_id':'1','text':'我喜欢成都音乐节，找搭子','published_at':datetime.now(timezone.utc).isoformat(),'synthetic':True},
+              {'platform':'douyin','content_id':'2','text':'我喜欢北京音乐节，找搭子','published_at':datetime.now(timezone.utc).isoformat(),'synthetic':True}]
         (dataset/'raw.jsonl').write_text(''.join(json.dumps(r,ensure_ascii=False)+'\n' for r in rows),encoding='utf-8')
         (dataset/'checkpoint.json').write_text(json.dumps({'status':'completed','records':2}),encoding='utf-8')
         launched=self.service.run(saved['revision'],'repeat-safe',spawn=False)

@@ -13,7 +13,10 @@ from .task_contract import validate_execution
 from .pipeline import fingerprint
 
 
-def execute(run_id,root=ROOT):
+def execute(run_id,root=None):
+    from .runtime_context import current_context,set_context
+    context=current_context();set_context(context)
+    root=Path(root) if root is not None else context.state_root
     from .control_server import RuleStore,validate_bundle
     service=TaskService(RuleStore(root));folder=service.runs/run_id
     request=json.loads((folder/'request.json').read_text(encoding='utf-8'));bundle=request['bundle']
@@ -65,7 +68,8 @@ def execute(run_id,root=ROOT):
                 source=Path(data['raw_file'])
         update(phase='analyzing',dataset_id=source.parent.name,input_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
         from .workflow import run
-        result=run(source,folder/'policy.json',Path(root)/'data/screening.sqlite3',Path(root)/'output/task-runs'/run_id,
+        from .db_access import resolve_db
+        result=run(source,folder/'policy.json',resolve_db(),Path(root)/'output/task-runs'/run_id,
                    execution['mode'],Path(root)/'config/connection.json',execution['max_api_calls'],task=bundle['task'],config_revision=request['revision'],on_start=lambda job_id:update(analysis_job_id=job_id))
         analysis_status=result['status']
         analysis_ok=analysis_status in ('completed','completed_empty','completed_with_review')

@@ -30,6 +30,10 @@ def collection_command(root,python,script,config,receipt,progress):
 
 
 def collect_selected(settings,folder,root):
+    from .runtime_context import current_context
+    context=current_context()
+    if not context.deployment.get("test_isolated"):
+        context.require_external('collection')
     root=Path(root);folder=Path(folder);platforms=selected(settings)
     dataset=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     job=root/'data/collections'/dataset;job.mkdir(parents=True,exist_ok=False)
