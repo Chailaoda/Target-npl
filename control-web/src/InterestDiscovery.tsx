@@ -52,6 +52,7 @@ type Account = {
 type Evidence = Metrics & {
   account_key: string
   topic: string
+  profile_version: string
   score_note: string
   items: Array<{
     id: number
@@ -153,7 +154,12 @@ export default function InterestDiscovery({ api }: { api: Api }) {
   async function feedback(id: number, action: string) {
     setFeedbackBusy(id); setError('')
     try {
-      const updated = await api<Account>('/api/interests/evidence-feedback', { evidence_id: id, action, note: action === 'restore' ? '恢复为有效证据' : '工作台人工标记' })
+      // The version shown on this evidence page is sent back with the id;
+      // a definition switch reuses ids, so the server must verify both.
+      const updated = await api<Account>('/api/interests/evidence-feedback', {
+        evidence_id: id, action, note: action === 'restore' ? '恢复为有效证据' : '工作台人工标记',
+        profile_version: evidence?.profile_version ?? ''
+      })
       setAccount(updated)
       if (selectedTopic) await openEvidence(selectedTopic)
       await search(offset)

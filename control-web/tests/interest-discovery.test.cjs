@@ -36,7 +36,7 @@ const evidenceItem = {
   published_display: '2026-11-09T00:00:00+00:00', relevance: 1, depth: .8, quality: .95, stance: 'positive', contribution: 3.04,
   raw_score: 3.04, source_url: 'https://www.bilibili.com/video/a1', quality_flags: [], review_state: 'accepted', review_note: ''
 }
-const evidence = { account_key: 'bilibili:A', topic: '胶片摄影', interest_score: 42, stance: 'positive', evidence_count: 1, independent_content_count: 1, active_days: 1, coverage: 'low', trend: 'insufficient_data', last_activity: '2026-11-09T00:00:00+00:00', score_note: '兴趣参与指数不是概率。', items: [evidenceItem] }
+const evidence = { account_key: 'bilibili:A', topic: '胶片摄影', profile_version: 'interest-v2:test', interest_score: 42, stance: 'positive', evidence_count: 1, independent_content_count: 1, active_days: 1, coverage: 'low', trend: 'insufficient_data', last_activity: '2026-11-09T00:00:00+00:00', score_note: '兴趣参与指数不是概率。', items: [evidenceItem] }
 let calls, feedbacks
 beforeEach(() => {
   calls = []; feedbacks = []; localStorage.clear()
@@ -95,5 +95,6 @@ test('topic input flows through results, profile, evidence and feedback', async 
   await waitFor(() => assert.equal(feedbacks.length, 1))
   assert.equal(feedbacks[0].evidence_id, 7)
   assert.equal(feedbacks[0].action, 'irrelevant')
+  assert.equal(feedbacks[0].profile_version, 'interest-v2:test')
   assert.ok(calls.some(u => u.startsWith('/api/interests/search?')))
 })

@@ -351,8 +351,23 @@ class InterestService:
                  status, at, at, None if status == "running" else at, error,
                  json.dumps(stats or {}, ensure_ascii=False)))
 
+    def _assert_single_account_definition(self, definition):
+        """A single-account recompute must reuse the active definition.
+
+        Otherwise the new definition becomes globally active while all other
+        accounts still hold profiles for the previous version, so they silently
+        disappear from every search result. Switching definitions requires a
+        full-topic analysis.
+        """
+        with closing(self._connect(readonly=True)) as db:
+            active = self._resolve_definition(db, definition["topic"])
+        if active and active.get("definition_hash") != definition["definition_hash"]:
+            raise ValueError("切换主题定义需要对全部账号重新分析；单账号重算只能沿用当前有效定义")
+
     def analyze(self, topic, aliases=None, exclude_terms=None, description="", account_key=None):
         definition = define_topic(topic, aliases, exclude_terms, description)
+        if account_key:
+            self._assert_single_account_definition(definition)
         now = datetime.now(timezone.utc)
         observed_at = now.isoformat()
         # Cache key includes the algorithm version so a rules change re-analyses.
@@ -599,14 +614,19 @@ class InterestService:
             visible.append(item)
         visible.sort(key=lambda e: (e.get("review_state", "accepted") == "accepted",
                                    e.get("contribution", 0), e["raw_score"], e["source_hash"]), reverse=True)
-        return {"account_key": account_key, "topic": key, **metrics, "items": visible,
+        return {"account_key": account_key, "topic": key, "profile_version": version or "",
+                **metrics, "items": visible,
                 "score_note": "兴趣参与指数不是概率或正向好感；它是窗口内独立证据贡献的确定性映射。半衰期用于趋势对比，窗口决定计入哪些证据；态度与证据充分程度单独展示。"}
 
-    def feedback(self, evidence_id, action, note=""):
+    def feedback(self, evidence_id, action, note="", profile_version=None):
         if action not in ("irrelevant", "stance_error", "attribution_question", "restore"):
             raise ValueError("证据反馈类型无效")
         if not isinstance(note, str) or len(note) > 1000:
             raise ValueError("反馈说明不能超过 1000 字符")
+        # The evidence id survives a definition switch (business-key upsert),
+        # so an old page must not be able to mutate the new profile with it.
+        if not isinstance(profile_version, str) or not profile_version.strip():
+            raise ValueError("反馈必须携带证据详情页展示的画像版本，请刷新证据详情后重试")
         state = "accepted" if action == "restore" else action
         with closing(self._connect()) as db, db:
             row = db.execute("SELECT * FROM interest_evidence WHERE id=?", (int(evidence_id),)).fetchone()
@@ -615,6 +635,8 @@ class InterestService:
             version = self._active_version(db, row["topic"])
             if version is None or row["profile_version"] != version:
                 raise ValueError("证据不属于当前画像版本，请重新分析该主题")
+            if profile_version != version or profile_version != row["profile_version"]:
+                raise ValueError("证据版本已变化，请刷新证据详情后重新提交反馈")
             definition = self._resolve_definition(db, row["topic"]) or define_topic(row["topic"])
             definition = dict(definition, profile_version=version)
             db.execute("UPDATE interest_evidence SET review_state=?,review_note=? WHERE id=?",

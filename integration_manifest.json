@@ -6,9 +6,9 @@
   "protocol_version": 2,
   "backend_package": "content_screening",
   "instance_binding": "4bef3b0b82258250502ded70d81e8334eeec474048631a292e8c50ae57f2de1c",
-  "build_digest": "d8dd20f5689f072b83ef2a679550579655bbf91c43a10c21ca77a73b73569a0e",
+  "build_digest": "400a7aa9356096df685ee1038f99b938c7d27b4b3f31a113f41af91b89591954",
   "file_count": 48,
-  "frozen_at": "2026-11-11T07:07:10Z",
+  "frozen_at": "2026-11-11T09:11:34Z",
   "path_normalization": "relative POSIX, UTF-8 byte order, raw SHA256 lowercase",
   "excluded": [
     ".git",
@@ -19,7 +19,7 @@
     "runtime outputs"
   ],
   "release_identity": {
-    "build_digest": "d8dd20f5689f072b83ef2a679550579655bbf91c43a10c21ca77a73b73569a0e"
+    "build_digest": "400a7aa9356096df685ee1038f99b938c7d27b4b3f31a113f41af91b89591954"
   },
-  "manifest_digest": "440d808ea279e525630111e604c1555d12a3c3353a0bb5951807ca545d5fe75d"
+  "manifest_digest": "862cb4add544ce70ab70c026c8284ee27e952d24929d8f8a8578fcd0b24765ac"
 }

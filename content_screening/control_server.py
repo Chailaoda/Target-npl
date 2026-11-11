@@ -236,8 +236,9 @@ def make_server(port=8766,store=None,context=None):
                         raise ValueError('兴趣分析参数无效')
                     return self.send(200,interests.analyze(**obj))
                 if route=='/api/interests/evidence-feedback':
-                    if not isinstance(obj,dict) or set(obj)!={'evidence_id','action','note'}:
-                        raise ValueError('证据反馈必须包含 evidence_id/action/note')
+                    allowed={'evidence_id','action','note','profile_version'}
+                    if not isinstance(obj,dict) or not {'evidence_id','action'} <= set(obj) or set(obj)-allowed:
+                        raise ValueError('证据反馈参数无效')
                     return self.send(200,interests.feedback(**obj))
                 if route=='/api/platforms/open-login':
                     from .platforms import open_login

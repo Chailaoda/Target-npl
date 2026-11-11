@@ -89,12 +89,9 @@ class ReviewFixesTests(unittest.TestCase):
         self.assertEqual(second["definition"]["profile_version"] != old_version, True)
         self.assertEqual(self.service.search("胶片摄影", min_evidence=0)["items"][0]["evidence_count"], 0)
         self.assertEqual(self.service.evidence("bilibili:A", "胶片摄影")["items"], [])
-        stale_ids = self.evidence_ids("胶片摄影")
-        self.assertEqual(len(stale_ids), 0)
-        # Feedback on an already-visible id cannot resurrect stale evidence.
-        if stale_ids:
-            with self.assertRaises(ValueError):
-                self.service.feedback(stale_ids[0], "irrelevant")
+        # No evidence rows remain, so there is no stale id to replay here.
+        # The harder case (id survives a version switch) has its own test below.
+        self.assertEqual(self.evidence_ids("胶片摄影"), [])
         self.assertEqual(self.service.evidence("bilibili:A", "胶片摄影")["items"], [])
 
     # P1: window metrics cached at analysis time must not disagree with detail view.
@@ -123,6 +120,48 @@ class ReviewFixesTests(unittest.TestCase):
         self.assertEqual(analyze_text({"text": "我喜欢摄影，但讨厌露营，不推荐跟风。"}, film)["stance"], "positive")
         self.assertEqual(analyze_text({"text": "我讨厌摄影，但喜欢露营，推荐大家去。"}, film)["stance"], "negative")
         self.assertEqual(analyze_text({"text": "我不喜欢摄影，也不推荐。"}, film)["stance"], "negative")
+
+    # Round 2 / P1: a UPSERT keeps the evidence id when the definition changes.
+    # A page opened under A must not be able to mutate B's profile with that id.
+    def test_stale_page_feedback_cannot_modify_new_version(self):
+        self.rows(public_row("x1", "A", "我喜欢胶片摄影，分享拍摄实践经验。"))
+        first = self.service.analyze("胶片摄影", aliases=["胶片相机"])
+        version_a = first["definition"]["profile_version"]
+        page_a = self.service.evidence("bilibili:A", "胶片摄影")
+        self.assertEqual(page_a["profile_version"], version_a)
+        stale_id = page_a["items"][0]["id"]
+        second = self.service.analyze("胶片摄影", aliases=["底片摄影"])
+        version_b = second["definition"]["profile_version"]
+        self.assertNotEqual(version_a, version_b)
+        page_b = self.service.evidence("bilibili:A", "胶片摄影")
+        self.assertEqual(page_b["profile_version"], version_b)
+        self.assertEqual(page_b["items"][0]["id"], stale_id)  # id reused by upsert
+        with self.assertRaises((ValueError, TypeError)):
+            self.service.feedback(stale_id, "irrelevant", "旧页面提交", profile_version=version_a)
+        with self.assertRaises(ValueError):
+            self.service.feedback(stale_id, "irrelevant", "未携带版本号的旧客户端")
+        self.assertEqual(self.service.evidence("bilibili:A", "胶片摄影")["items"][0]["review_state"], "accepted")
+        self.assertEqual(self.service.search("胶片摄影")["items"][0]["evidence_count"], 1)
+        self.service.feedback(stale_id, "irrelevant", "当前页面提交", profile_version=version_b)
+        self.assertEqual(self.service.evidence("bilibili:A", "胶片摄影")["items"][0]["review_state"], "irrelevant")
+
+    # Round 2 / P1: single-account re-analysis must not switch the active
+    # definition, otherwise every other account vanishes from the result list.
+    def test_single_account_reanalysis_cannot_switch_active_definition(self):
+        self.rows(public_row("x1", "A", "我喜欢胶片摄影，分享拍摄实践经验。"),
+                  public_row("x2", "B", "我喜欢胶片摄影，记录显影参数和实践经验。"),
+                  public_row("x3", "C", "我喜欢胶片摄影，对比底片扫描的实践经验。"))
+        first = self.service.analyze("胶片摄影", aliases=["胶片相机"])
+        self.assertEqual(first["total"], 3)
+        version_a = first["definition"]["profile_version"]
+        with self.assertRaises(ValueError):
+            self.service.analyze("胶片摄影", aliases=["底片摄影"], account_key="bilibili:A")
+        self.assertEqual(self.service.topic_status("胶片摄影")["definition"]["profile_version"], version_a)
+        self.assertEqual(self.service.search("胶片摄影")["total"], 3)
+        # Re-running the ACTIVE definition for one account stays valid.
+        self.assertEqual(self.service.analyze("胶片摄影", aliases=["胶片相机"], account_key="bilibili:A")["total"], 3)
+        # A definition switch is allowed only as a full-topic analysis.
+        self.assertEqual(self.service.analyze("胶片摄影", aliases=["底片摄影"])["total"], 3)
 
     # P2: a failed analysis must persist its status outside the rolled-back transaction.
     def test_failed_analysis_status_survives_rollback(self):

@@ -79,8 +79,13 @@ class InterestApiTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as forbidden:
             self.post("/api/interests/analyze", {"topic": "徒步"}, token="invalid")
         self.assertEqual(forbidden.exception.code, 403)
+        with self.assertRaises(urllib.error.HTTPError) as stale:
+            self.post("/api/interests/evidence-feedback", {"evidence_id": evidence["items"][0]["id"],
+                                                           "action": "irrelevant", "note": "缺少版本号"})
+        self.assertEqual(stale.exception.code, 400)
         saved = self.post("/api/interests/evidence-feedback", {"evidence_id": evidence["items"][0]["id"],
-                                                               "action": "irrelevant", "note": "合成测试反馈"})
+                                                               "action": "irrelevant", "note": "合成测试反馈",
+                                                               "profile_version": evidence["profile_version"]})
         self.assertEqual(saved["interests"][0]["evidence_count"], 0)
         self.assertEqual(self.get("/api/accounts")["total"], 3)
         with self.assertRaises(urllib.error.HTTPError) as missing:
