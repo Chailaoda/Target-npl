@@ -71,6 +71,17 @@ CREATE TABLE IF NOT EXISTS interest_evidence(
     stance TEXT NOT NULL DEFAULT '',
     quote TEXT NOT NULL DEFAULT '',
     observed_at TEXT NOT NULL,
+    object_type TEXT NOT NULL DEFAULT '',
+    published_at TEXT,
+    relevance REAL NOT NULL DEFAULT 0,
+    depth REAL NOT NULL DEFAULT 0,
+    quality REAL NOT NULL DEFAULT 0,
+    source_url TEXT NOT NULL DEFAULT '',
+    quality_flags TEXT NOT NULL DEFAULT '[]',
+    details_json TEXT NOT NULL DEFAULT '{}',
+    profile_version TEXT NOT NULL DEFAULT '',
+    review_state TEXT NOT NULL DEFAULT 'accepted',
+    review_note TEXT NOT NULL DEFAULT '',
     UNIQUE(account_key, topic, analysis_key)
 );
 CREATE TABLE IF NOT EXISTS interest_profiles(
@@ -85,6 +96,11 @@ CREATE TABLE IF NOT EXISTS interest_profiles(
     evidence_notes TEXT NOT NULL DEFAULT '',
     profile_version TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    evidence_count INTEGER NOT NULL DEFAULT 0,
+    independent_content_count INTEGER NOT NULL DEFAULT 0,
+    coverage TEXT NOT NULL DEFAULT 'insufficient',
+    last_activity TEXT,
+    details_json TEXT NOT NULL DEFAULT '{}',
     UNIQUE(account_key, topic, profile_version)
 );
 CREATE TABLE IF NOT EXISTS interest_profile_versions(
@@ -93,7 +109,31 @@ CREATE TABLE IF NOT EXISTS interest_profile_versions(
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_content_links_source ON account_content_links(source_hash);
-CREATE INDEX IF NOT EXISTS idx_evidence_account_topic ON interest_evidence(account_key, topic);
+CREATE TABLE IF NOT EXISTS interest_topic_definitions(
+    topic_key TEXT NOT NULL,
+    definition_json TEXT NOT NULL,
+    definition_hash TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    error TEXT NOT NULL DEFAULT '',
+    stats_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY(topic_key, definition_hash)
+);
+CREATE TABLE IF NOT EXISTS interest_content_analysis(
+    account_key TEXT NOT NULL,
+    topic_key TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    definition_hash TEXT NOT NULL,
+    analysis_key TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    details_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(account_key, topic_key, source_hash, definition_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_interest_topic_status ON interest_topic_definitions(topic_key, status);
+CREATE INDEX IF NOT EXISTS idx_interest_profile_topic ON interest_profiles(topic, profile_version, score);
 """
 
 
@@ -105,7 +145,28 @@ def account_key(platform, account_id):
     return f"{platform}:{account_id}"
 
 
-def migrate(db):
+def _add_interest_columns(db):
+    extensions = {
+        "interest_evidence": {
+            "object_type": "TEXT NOT NULL DEFAULT ''", "published_at": "TEXT",
+            "relevance": "REAL NOT NULL DEFAULT 0", "depth": "REAL NOT NULL DEFAULT 0",
+            "quality": "REAL NOT NULL DEFAULT 0", "source_url": "TEXT NOT NULL DEFAULT ''",
+            "quality_flags": "TEXT NOT NULL DEFAULT '[]'", "details_json": "TEXT NOT NULL DEFAULT '{}'",
+            "profile_version": "TEXT NOT NULL DEFAULT ''", "review_state": "TEXT NOT NULL DEFAULT 'accepted'",
+            "review_note": "TEXT NOT NULL DEFAULT ''"},
+        "interest_profiles": {
+            "evidence_count": "INTEGER NOT NULL DEFAULT 0", "independent_content_count": "INTEGER NOT NULL DEFAULT 0",
+            "coverage": "TEXT NOT NULL DEFAULT 'insufficient'", "last_activity": "TEXT",
+            "details_json": "TEXT NOT NULL DEFAULT '{}'"},
+    }
+    for table, columns in extensions.items():
+        actual = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+        for name, sql in columns.items():
+            if name not in actual:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql}")
+
+
+def migrate(db, *, own_transaction=True):
     """Idempotent forward migration (all CREATE IF NOT EXISTS, rollback-safe).
 
     Atomic: the schema is applied inside one explicit transaction, so an
@@ -114,8 +175,20 @@ def migrate(db):
     auto-commit per statement; we split on ';' and wrap in BEGIN/COMMIT.)
     """
     isolation = db.isolation_level
+    if db.in_transaction:
+        # Any caller-owned transaction stays caller-owned, including sqlite3
+        # context managers and the unified BEGIN IMMEDIATE migrator.
+        for statement in SCHEMA.split(";"):
+            if statement.strip():
+                db.execute(statement)
+        cols = {r[1] for r in db.execute("PRAGMA table_info(account_content_links)")}
+        if "attribution_authority" not in cols:
+            db.execute("ALTER TABLE account_content_links ADD COLUMN "
+                       "attribution_authority TEXT NOT NULL DEFAULT 'raw_import'")
+        _add_interest_columns(db)
+        return
     try:
-        db.isolation_level = None  # manual transaction control
+        db.isolation_level = None
         db.execute("BEGIN")
         for statement in SCHEMA.split(";"):
             if statement.strip():
@@ -127,9 +200,12 @@ def migrate(db):
         if "attribution_authority" not in cols:
             db.execute("ALTER TABLE account_content_links ADD COLUMN "
                        "attribution_authority TEXT NOT NULL DEFAULT 'raw_import'")
-        db.execute("COMMIT")
+        _add_interest_columns(db)
+        if db.in_transaction:
+            db.execute("COMMIT")
     except Exception:
-        db.execute("ROLLBACK")
+        if db.in_transaction:
+            db.execute("ROLLBACK")
         raise
     finally:
         db.isolation_level = isolation

@@ -13,7 +13,11 @@ from .task_service import atomic_json
 
 
 def compile_goal(goal,bundle,capabilities):
-    config=load_connection(ROOT/'config/connection.json');ark=config['ark'];validate_ark_route(ark)
+    from .runtime_context import current_context
+    context=current_context()
+    if not context.deployment.get("test_isolated"):
+        context.require_external('model')
+    config=load_connection(context.state_path('config/connection.json'));ark=config['ark'];validate_ark_route(ark)
     schema={'type':'object','properties':{
         'changes':{'type':'array','maxItems':200,'items':{'type':'object','properties':{'op':{'type':'string','enum':['add','replace','remove']},'path':{'type':'string'},'value':{}},'required':['op','path','value'],'additionalProperties':False}},
         'assumptions':{'type':'array','items':{'type':'string'}},'unresolved':{'type':'array','items':{'type':'string'}}},'required':['changes','assumptions','unresolved'],'additionalProperties':False}
@@ -34,7 +38,7 @@ def compile_goal(goal,bundle,capabilities):
         '平台可选 douyin/xhs/kuaishou/bilibili/weibo/tieba/zhihu；多平台采集时各平台共享设定的总配额池（shared_pool_budget），自动按实际抓取速度分配。'
         '当采集量、页数、请求数或模型调用额度需要扩大时，将变更直接写入 changes，不要写入 unresolved；系统会自动审核预算合规性并在必要时自动收敛至安全范围，无需人工干预。')
     record={'created_at':datetime.now(timezone.utc).isoformat(),'goal_sha256':hashlib.sha256(goal.encode()).hexdigest(),'model':ark['model'],'status':'started','usage':{}}
-    audit=ROOT/'data/planner-attempts'/f'{uuid.uuid4().hex}.json';atomic_json(audit,record)
+    audit=context.state_path('data/planner-attempts')/f'{uuid.uuid4().hex}.json';atomic_json(audit,record)
     try:
         body,_=request(ark['base_url']+'/chat/completions',hosts=ARK_HOSTS,mode=ark['proxy_mode'],key=read_key(ark['credential_target']),timeout=60,
             payload={'model':ark['model'],'messages':[{'role':'system','content':instructions},{'role':'user','content':json.dumps({'goal':goal,'current_bundle':bundle,'capabilities':capabilities},ensure_ascii=False)}],

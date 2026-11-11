@@ -22,33 +22,10 @@ def utcnow():
     return datetime.now(timezone.utc).isoformat()
 
 
-def connect(path):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path)
-    db.row_factory = sqlite3.Row
-    db.executescript("""
-    PRAGMA foreign_keys=ON;
-    CREATE TABLE IF NOT EXISTS v2_sources(source_hash TEXT PRIMARY KEY, object_key TEXT NOT NULL, source_json TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS v2_policies(policy_hash TEXT PRIMARY KEY, policy_json TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS v2_observations(input_hash TEXT, line INTEGER, source_hash TEXT REFERENCES v2_sources, keyword TEXT, raw_hash TEXT, input_file TEXT,
-        PRIMARY KEY(input_hash,line));
-    CREATE TABLE IF NOT EXISTS v2_jobs(job_id TEXT PRIMARY KEY, created_at TEXT, finished_at TEXT, status TEXT, input_hash TEXT, policy_hash TEXT, identity_json TEXT);
-    CREATE TABLE IF NOT EXISTS v2_tasks(job_id TEXT REFERENCES v2_jobs, source_hash TEXT REFERENCES v2_sources, analysis_key TEXT, status TEXT, error_code TEXT,
-        PRIMARY KEY(job_id,source_hash));
-    CREATE TABLE IF NOT EXISTS v2_analyses(analysis_key TEXT PRIMARY KEY, source_hash TEXT REFERENCES v2_sources, policy_hash TEXT, context_json TEXT, result_json TEXT, created_at TEXT);
-    CREATE TABLE IF NOT EXISTS v2_reviews(analysis_key TEXT PRIMARY KEY REFERENCES v2_analyses, decision TEXT, note TEXT, updated_at TEXT);
-    CREATE TABLE IF NOT EXISTS v2_review_history(id INTEGER PRIMARY KEY, analysis_key TEXT REFERENCES v2_analyses, decision TEXT, note TEXT, updated_at TEXT);
-    CREATE TABLE IF NOT EXISTS v2_attempts(id INTEGER PRIMARY KEY, job_id TEXT REFERENCES v2_jobs, analysis_key TEXT, api_called INTEGER,
-        status TEXT, error_code TEXT, usage_json TEXT, created_at TEXT);
-    """)
-    columns={r[1] for r in db.execute('PRAGMA table_info(v2_jobs)')}
-    for column in ('task_json','config_revision'):
-        if column not in columns:db.execute(f'ALTER TABLE v2_jobs ADD COLUMN {column} TEXT')
-    # WP3: idempotent forward migration for account/interest tables. Pure
-    # CREATE IF NOT EXISTS — old code versions ignore the new tables.
-    from .account_repository import migrate as _migrate_accounts
-    _migrate_accounts(db)
-    return db
+def connect(path=None, *, readonly=False):
+    """Compatibility shim: schema creation belongs only to db_migrate."""
+    from .db_access import connect as resolve_connect
+    return resolve_connect(path, readonly=readonly)
 
 
 def build_context(record, versions):
@@ -328,7 +305,7 @@ def main():
     command.add_argument("--input", required=True)
     command.add_argument("--policy")
     command.add_argument('--task-file')
-    command.add_argument("--db", default="data/screening.sqlite3")
+    command.add_argument("--db", default=None)
     command.add_argument("--output", default="output/workflow")
     command.add_argument("--mode", choices=["rules", "ark"])
     command.add_argument("--connection", default="config/connection.json")
@@ -345,15 +322,22 @@ def main():
     r.add_argument("--analysis-key", required=True)
     r.add_argument("--decision", choices=["confirm", "reject", "uncertain"], required=True)
     r.add_argument("--note", default="")
-    r.add_argument("--db", default="data/screening.sqlite3")
+    r.add_argument("--db", default=None)
     ex = subs.add_parser("export")
     ex.add_argument("--job-id", required=True)
-    ex.add_argument("--db", default="data/screening.sqlite3")
+    ex.add_argument("--db", default=None)
     ex.add_argument("--output", default="output/workflow")
     args = parser.parse_args()
     runtime_task=None;config_revision=None
     try:
         if args.command in ('run','collect-run'):
+            from .runtime_context import current_context,set_context
+            context=current_context();set_context(context)
+            ROOT=context.state_root
+            from .db_access import resolve_db
+            if args.command=='run':args.db=args.db or str(resolve_db(context))
+            if args.command=='collect-run':args.db=str(resolve_db(context))
+            if args.command=='export':args.db=args.db or str(resolve_db(context))
             from .active_config import active_paths
             selected_policy,selected_collection=active_paths()
             default_policy=args.policy is None
@@ -387,7 +371,7 @@ def main():
                 monitor=ROOT/'data/task-runs'/uuid.uuid4().hex;monitor.mkdir(parents=True)
                 receipt=collect_selected(settings,monitor,ROOT)
                 if receipt['status'] not in ('completed','completed_empty'):raise ValueError('采集未完整完成；保留各平台检查点，请完成登录或排查失败，不自动分析部分批次')
-            result = run(receipt["raw_file"], args.policy, ROOT / "data/screening.sqlite3", ROOT / "output/workflow", args.mode, ROOT / "config/connection.json", args.max_api_calls,task=runtime_task,config_revision=config_revision)
+            result = run(receipt["raw_file"], args.policy, args.db, ROOT / "output/workflow", args.mode, ROOT / "config/connection.json", args.max_api_calls,task=runtime_task,config_revision=config_revision)
         else:
             result = run(args.input, args.policy, args.db, args.output, args.mode, args.connection, args.max_api_calls, job_id=args.resume_job,task=runtime_task,config_revision=config_revision)
     except (ValueError, OSError, sqlite3.Error, subprocess.TimeoutExpired) as error:

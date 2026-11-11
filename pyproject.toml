@@ -1,7 +1,7 @@
 [project]
-name = "target-npl"
+name = "festival-match"
 version = "0.1.0"
-description = "Local, evidence-linked filtering of public sample topic content"
+description = "Local, evidence-linked filtering of public music festival content"
 requires-python = ">=3.12"
 dependencies = []
 

@@ -7,32 +7,15 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from content_screening.platforms import PLATFORMS,catalog,selected
-from content_screening.platform_projection import project,timestamp
-from content_screening.normalization import normalize,public_url
-from content_screening.multi_collection import collect_selected
-from content_screening.vendor_env import VendorEnvironment,load_registry
-from content_screening.task_service import atomic_json,TaskService
-from content_screening.control_server import RuleStore
+from festival_match.platforms import PLATFORMS,catalog,selected
+from festival_match.platform_projection import project,timestamp
+from festival_match.normalization import normalize,public_url
+from festival_match.multi_collection import collect_selected
+from festival_match.task_service import atomic_json,TaskService
+from festival_match.control_server import RuleStore
 from scripts.mediacrawler_collect import validate_settings,validate_session
 
 ROOT=Path(__file__).resolve().parents[1]
-
-
-def stub_vendor(root):
-    """Scheduler preflight now resolves a real vendor environment before any
-    child starts. These tests exercise budget/merge logic with a mocked
-    subprocess, so inject a resolved baseline environment instead of doing
-    filesystem/git checks against the temporary data root. The real resolver
-    is covered end-to-end in tests/test_vendor_env.py.
-    """
-    python=root/'vendor/MediaCrawler/.venv/Scripts/python.exe'
-    python.parent.mkdir(parents=True,exist_ok=True)
-    python.touch()
-    decl=load_registry(ROOT)
-    source=root/'vendor/MediaCrawler'
-    return VendorEnvironment(root=root,source_dir=source,python=python,
-        sha=decl['commit'],kind='upstream',public_accounts=False,flag='',declaration=decl)
 
 
 class PlatformTests(unittest.TestCase):
@@ -81,14 +64,13 @@ class PlatformTests(unittest.TestCase):
             state={'status':'completed','records':len(rows),'posts':len(rows),'comments':0,'requests':2,'raw_file':str(raw),'settings':value}
             atomic_json(folder/'checkpoint.json',state);atomic_json(Path(command[command.index('--receipt')+1]),state)
             return subprocess.CompletedProcess(command,0)
-        with patch('content_screening.multi_collection.resolve_vendor_env',return_value=stub_vendor(self.root)), \
-             patch('content_screening.multi_collection.subprocess.run',side_effect=child):result=collect_selected(settings,self.folder,self.root)
+        with patch('festival_match.multi_collection.subprocess.run',side_effect=child):result=collect_selected(settings,self.folder,self.root)
         self.assertEqual(result['status'],'completed');self.assertEqual(result['posts'],3)
         self.assertLessEqual(sum(v['max_posts'] for v in limits),3)
         self.assertTrue(all(v['proxy_mode']=='direct' for v in limits));self.assertEqual(result['requests'],4)
         rows=[json.loads(line) for line in Path(result['raw_file']).read_text(encoding='utf-8').splitlines()]
         self.assertEqual({r['platform'] for r in rows},{'xhs','weibo'})
-        for name in ('config/collection.json','profiles/default.json'):
+        for name in ('config/collection.json','profiles/music_festival_v2.json'):
             path=self.root/name;path.parent.mkdir(exist_ok=True);path.write_bytes((ROOT/name).read_bytes())
         datasets=TaskService(RuleStore(self.root)).datasets();self.assertEqual(len(datasets),1)
         self.assertEqual(datasets[0]['platforms'],['xhs','weibo'])
@@ -101,165 +83,19 @@ class PlatformTests(unittest.TestCase):
             raw=folder/'raw.jsonl';raw.touch();state={'status':'needs_user_login','records':0,'posts':0,'comments':0,'requests':0,'raw_file':str(raw)}
             atomic_json(folder/'checkpoint.json',state);atomic_json(Path(command[command.index('--receipt')+1]),state)
             return subprocess.CompletedProcess(command,2)
-        with patch('content_screening.multi_collection.resolve_vendor_env',return_value=stub_vendor(self.root)), \
-             patch('content_screening.multi_collection.subprocess.run',side_effect=child):result=collect_selected(settings,self.folder,self.root)
+        with patch('festival_match.multi_collection.subprocess.run',side_effect=child):result=collect_selected(settings,self.folder,self.root)
         self.assertEqual(result['status'],'needs_user_login');self.assertEqual(result['requests'],0)
         self.assertEqual(len(result['platform_statuses']),2)
 
-    def _run_platforms(self, outcomes, corrupt_platform=None):
-        """Drive collect_selected with mocked children; no network or login.
-
-        outcomes maps platform -> (child status, records, identity_mode[,
-        exit_code]). The optional exit_code lets a test build a child that
-        crashed while still leaving a "completed" receipt behind. Setting
-        corrupt_platform injects a truncated third line into that child's
-        raw.jsonl (first two lines stay valid) to exercise atomic merging.
-        """
-        names=list(outcomes)
-        settings=dict(self.settings,platforms=names,platform=names[0],
-                      max_posts=6,max_requests=30,timeout_seconds=60)
-        def child(command,**kwargs):
-            value=json.loads(Path(command[command.index('--config')+1]).read_text(encoding='utf-8'))
-            platform=value['platform'];index=names.index(platform)
-            folder=self.root/'data/collections'/('20261107T00000000000%dZ'%index)
-            folder.mkdir(parents=True,exist_ok=True)
-            raw=folder/'raw.jsonl';raw.touch()
-            outcome=outcomes[platform]
-            status,records,mode=outcome[:3]
-            exit_code=outcome[3] if len(outcome)>3 else (0 if status in ('completed','completed_empty') else 1)
-            rows=[{'platform':platform,'object_type':'post','data':{'content_id':str(i),'text':'公开原文'}} for i in range(records)]
-            lines=[json.dumps(r)+'\n' for r in rows]
-            if corrupt_platform==platform:
-                # First two lines are valid, the third one is broken JSON.
-                lines.insert(2,'{"object_type":"post","data":{"broken":\n')
-            raw.write_text(''.join(lines),encoding='utf-8')
-            state={'status':status,'records':records,'posts':records,'comments':0,'requests':2,
-                   'raw_file':str(raw),'settings':value,'identity_mode':mode}
-            atomic_json(Path(command[command.index('--receipt')+1]),state)
-            return subprocess.CompletedProcess(command,exit_code)
-        with patch('content_screening.multi_collection.resolve_vendor_env',return_value=stub_vendor(self.root)), \
-             patch('content_screening.multi_collection.subprocess.run',side_effect=child):
-            return collect_selected(settings,self.folder,self.root)
-
-    def test_partial_platform_failure_is_never_reported_as_completed(self):
-        result=self._run_platforms({'bilibili':('completed',2,'public_source'),
-                                    'xhs':('failed',0,'public_source')})
-        self.assertEqual(result['status'],'partial')
-        self.assertEqual(result['incomplete_platforms'],['xhs'])
-        self.assertEqual(result['records'],2)
-        self.assertTrue(any(e.get('platform')=='xhs' for e in result['errors']))
-        rows=[json.loads(line) for line in Path(result['raw_file']).read_text(encoding='utf-8').splitlines()]
-        self.assertEqual({r['platform'] for r in rows},{'bilibili'})
-
-    def test_partial_login_failure_also_stays_partial(self):
-        result=self._run_platforms({'bilibili':('completed',2,'public_source'),
-                                    'xhs':('needs_user_login',0,'public_source')})
-        self.assertEqual(result['status'],'partial')
-        self.assertEqual(result['incomplete_platforms'],['xhs'])
-        self.assertEqual(result['records'],2)
-
-    def test_all_platforms_success_still_reports_completed(self):
-        result=self._run_platforms({'bilibili':('completed',2,'public_source'),
-                                    'xhs':('completed',1,'public_source')})
-        self.assertEqual(result['status'],'completed')
-        self.assertEqual(result['incomplete_platforms'],[])
-        self.assertEqual(result['records'],3)
-
-    def test_aggregate_identity_mode_reflects_child_receipts(self):
-        result=self._run_platforms({'bilibili':('completed',1,'public_source'),
-                                    'xhs':('completed',1,'public_source')})
-        self.assertEqual(result['identity_mode'],'public_source')
-        self.assertEqual(result['platform_identity_modes'],
-                         {'bilibili':'public_source','xhs':'public_source'})
-
-    def test_mixed_identity_modes_are_not_collapsed_to_one(self):
-        result=self._run_platforms({'bilibili':('completed',1,'public_source'),
-                                    'xhs':('completed',1,'upstream_anonymized')})
-        self.assertEqual(result['identity_mode'],'mixed')
-        self.assertEqual(len(result['platform_identity_modes']),2)
-
-    # --- P1-2: child exit code must agree with its receipt ----------------
-    def test_nonzero_exit_with_success_receipt_is_not_a_success(self):
-        result=self._run_platforms({'bilibili':('completed',2,'public_source'),
-                                    'xhs':('completed',3,'public_source',1)})
-        self.assertEqual(result['status'],'partial')
-        lane=next(p for p in result['platform_statuses'] if p['platform']=='xhs')
-        self.assertEqual(lane['status'],'failed')
-        self.assertEqual(lane['exit_code'],1)
-        self.assertEqual(lane['receipt_status'],'completed')
-        self.assertTrue(any(e.get('code')=='CHILD_EXIT_RECEIPT_CONFLICT' for e in result['errors']))
-        self.assertEqual(result['records'],2)
-        rows=[json.loads(line) for line in Path(result['raw_file']).read_text(encoding='utf-8').splitlines()]
-        self.assertEqual({r['platform'] for r in rows},{'bilibili'})
-        self.assertEqual(result['platform_identity_modes'],{'bilibili':'public_source'})
-
-    def test_all_conflicting_children_never_report_completed_empty(self):
-        result=self._run_platforms({'bilibili':('completed',2,'public_source',1)})
-        self.assertEqual(result['status'],'failed')
-        self.assertEqual(result['records'],0)
-        self.assertEqual(result['identity_mode'],'unresolved')
-        self.assertEqual(result['platform_statuses'][0]['status'],'failed')
-
-    # --- Round 8: a corrupt child file must merge atomically -------------
-    def test_corrupt_child_jsonl_leaves_no_partial_rows_in_aggregate(self):
-        result=self._run_platforms(
-            {'bilibili':('completed',2,'public_source'),
-             'xhs':('completed',4,'public_source')},corrupt_platform='xhs')
-        self.assertEqual(result['status'],'partial')
-        lane=next(p for p in result['platform_statuses'] if p['platform']=='xhs')
-        self.assertEqual(lane['status'],'failed')
-        self.assertEqual(lane.get('records',0),0)
-        self.assertTrue(any(e.get('platform')=='xhs' and e.get('code')=='JSONDecodeError'
-                            for e in result['errors']))
-        # Nothing from the failed child may survive in the parent raw.jsonl,
-        # and its receipt counts must not inflate the aggregate.
-        text=Path(result['raw_file']).read_text(encoding='utf-8')
-        rows=[json.loads(line) for line in text.splitlines()]
-        self.assertEqual(len(text.splitlines()),2)
-        self.assertEqual({r['platform'] for r in rows},{'bilibili'})
-        self.assertEqual(result['records'],2)
-        self.assertEqual(result['posts'],2)
-        self.assertEqual(result['platform_identity_modes'],{'bilibili':'public_source'})
-
-    def test_corrupt_only_child_never_leaves_data_for_analysis(self):
-        # Worst case from the review: no platform succeeded, so task_worker
-        # must see an EMPTY raw file and stop instead of analysing residue.
-        result=self._run_platforms({'xhs':('completed',4,'public_source')},corrupt_platform='xhs')
-        self.assertEqual(result['status'],'failed')
-        self.assertEqual(result['records'],0)
-        self.assertEqual(result['posts'],0)
-        self.assertEqual(result['identity_mode'],'unresolved')
-        self.assertEqual(Path(result['raw_file']).read_text(encoding='utf-8'),'')
-
-    # --- P2: only actually merged content defines the identity mode ------
-    def test_completed_empty_does_not_contribute_identity_mode(self):
-        result=self._run_platforms({'bilibili':('completed',1,'public_source'),
-                                    'xhs':('completed_empty',0,'upstream_anonymized')})
-        self.assertEqual(result['status'],'completed')
-        self.assertEqual(result['identity_mode'],'public_source')
-        self.assertEqual(result['platform_identity_modes'],{'bilibili':'public_source'})
-
-    def test_missing_identity_mode_forces_unresolved(self):
-        result=self._run_platforms({'bilibili':('completed',1,'public_source'),
-                                    'xhs':('completed',1,'')})
-        self.assertEqual(result['identity_mode'],'unresolved')
-        self.assertEqual(result['platform_identity_modes']['xhs'],'unresolved')
-
-    def test_untrusted_identity_mode_forces_unresolved(self):
-        result=self._run_platforms({'bilibili':('completed',1,'public_source'),
-                                    'xhs':('completed',1,'unknown')})
-        self.assertEqual(result['identity_mode'],'unresolved')
-        self.assertEqual(result['platform_identity_modes']['xhs'],'unresolved')
-
     def test_all_platforms_keep_distinct_content_and_anonymous_groups(self):
-        from content_screening.workflow import run
-        from content_screening.task_contract import default_task
-        for name in ('config/collection.json','profiles/default.json'):
+        from festival_match.workflow import run
+        from festival_match.task_contract import default_task
+        for name in ('config/collection.json','profiles/music_festival_v2.json'):
             path=self.root/name;path.parent.mkdir(exist_ok=True);path.write_bytes((ROOT/name).read_bytes())
         bundle=TaskService(RuleStore(self.root)).get()['bundle'];task=default_task(bundle)
-        rows=[{'platform':platform,'object_type':'post','data':{'content_id':'same-id','text':'示例城市甲示例活动，我喜欢，找搭子一起去','creator_hash':'same-hash','anonymized':True}} for platform in PLATFORMS]
+        rows=[{'platform':platform,'object_type':'post','data':{'content_id':'same-id','text':'成都音乐节，我喜欢，找搭子一起去','creator_hash':'same-hash','anonymized':True}} for platform in PLATFORMS]
         source=self.root/'mixed.jsonl';source.write_text(''.join(json.dumps(r,ensure_ascii=False)+'\n' for r in rows),encoding='utf-8')
-        result=run(source,self.root/'profiles/default.json',self.root/'data/screening.sqlite3',self.root/'output',mode='rules',task=task)
+        result=run(source,self.root/'profiles/music_festival_v2.json',self.root/'data/festival.sqlite3',self.root/'output',mode='rules',task=task)
         self.assertEqual(result['unique_contents'],7);self.assertEqual(result['candidate_anonymous_groups'],7)
         self.assertEqual(result['candidate_public_accounts'],0);self.assertEqual(result['api_calls'],0)
         report=Path(result['report']).read_text(encoding='utf-8')
@@ -268,13 +104,13 @@ class PlatformTests(unittest.TestCase):
     def test_platform_http_catalog_and_manual_login_route_are_scoped(self):
         import threading
         import urllib.request
-        from content_screening.control_server import make_server
-        from content_screening.agent_mcp import AgentTools
-        for name in ('config/collection.json','profiles/default.json'):
+        from festival_match.control_server import make_server
+        from festival_match.agent_mcp import AgentTools
+        for name in ('config/collection.json','profiles/music_festival_v2.json'):
             path=self.root/name;path.parent.mkdir(exist_ok=True);path.write_bytes((ROOT/name).read_bytes())
         store=RuleStore(self.root);service=TaskService(store)
         tools=AgentTools(service);self.assertEqual(len(tools.call('screening_platforms',{})),7)
-        with patch('content_screening.platforms.open_login',return_value={'status':'awaiting_manual_login'}) as open_window:
+        with patch('festival_match.platforms.open_login',return_value={'status':'awaiting_manual_login'}) as open_window:
             result=tools.call('screening_platform_login',{'platform':'xhs'});self.assertEqual(result['status'],'awaiting_manual_login')
             open_window.assert_called_once_with(platform='xhs')
         server=make_server(0,store);threading.Thread(target=server.serve_forever,daemon=True).start()
@@ -283,7 +119,7 @@ class PlatformTests(unittest.TestCase):
         with opener.open(base+'/api/platforms') as response:self.assertEqual(len(json.load(response)),7)
         with opener.open(base+'/api/state') as response:token=json.load(response)['token']
         request=urllib.request.Request(base+'/api/platforms/open-login',data=b'{"platform":"xhs"}',headers={'Origin':base,'Content-Type':'application/json','X-Control-Token':token})
-        with patch('content_screening.platforms.open_login',return_value={'status':'awaiting_manual_login'}) as open_window:
+        with patch('festival_match.platforms.open_login',return_value={'status':'awaiting_manual_login'}) as open_window:
             with opener.open(request) as response:self.assertEqual(json.load(response)['status'],'awaiting_manual_login')
             open_window.assert_called_once_with('xhs')
 

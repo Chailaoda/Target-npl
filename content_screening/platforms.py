@@ -19,15 +19,19 @@ def selected(collection):
 
 
 def catalog(root=None):
-    from .active_config import ROOT
-    root=Path(root or ROOT)
+    from .runtime_context import current_context
+    root=Path(root or current_context().state_root)
     return [{'id':key,'name':item['name'],'upstream':item['upstream'],'adapter':'available',
         'browser_configured':(root/f'cache/{key}-browser-session.json').exists(),
         'login_status':'not_verified','live_acceptance':'pending_user_login_and_live_test'} for key,item in PLATFORMS.items()]
 
 
 def open_login(platform):
-    from .active_config import ROOT
+    from .runtime_context import current_context
+    context=current_context()
+    if not context.deployment.get("test_isolated"):
+        context.require_external('login')
+    ROOT=context.state_root
     from scripts.mediacrawler_collect import ensure_browser
     if platform not in PLATFORMS:raise ValueError('不支持的平台')
     path=ROOT/f'cache/{platform}-browser-session.json';path.parent.mkdir(parents=True,exist_ok=True)

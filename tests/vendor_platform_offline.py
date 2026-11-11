@@ -13,10 +13,10 @@ from unittest.mock import AsyncMock,patch
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT));sys.path.insert(0,str(ROOT/'vendor/MediaCrawler'));os.chdir(ROOT/'vendor/MediaCrawler')
 logging.disable(logging.CRITICAL)
-from content_screening.platforms import PLATFORMS
-from content_screening.platform_adapter import attach_store,search,detail,comments,detail_id
-from content_screening.platform_projection import project
-from content_screening.normalization import normalize
+from festival_match.platforms import PLATFORMS
+from festival_match.platform_adapter import attach_store,search,detail,comments,detail_id
+from festival_match.platform_projection import project
+from festival_match.normalization import normalize
 from scripts.platform_collect import RequestGate,collect
 from model.m_baidu_tieba import TiebaNote,TiebaComment
 from model.m_zhihu import ZhihuContent,ZhihuComment

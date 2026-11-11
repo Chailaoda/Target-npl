@@ -6,16 +6,16 @@ import unittest
 from contextlib import closing
 from unittest.mock import patch
 
-from content_screening.normalization import normalize
-from content_screening.rules_v2 import load_policy, local_analyze, validate_result, apply_decision
-from content_screening.workflow import run, review, connect, export_job
+from festival_match.normalization import normalize
+from festival_match.rules_v2 import load_policy, local_analyze, validate_result, apply_decision
+from festival_match.workflow import run, review, connect, export_job
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
-        self.policy_path = ROOT / "profiles/default.json"
+        self.policy_path = ROOT / "profiles/music_festival_v2.json"
         self.policy = load_policy(self.policy_path)
         (ROOT / "tmp/tests").mkdir(parents=True, exist_ok=True)
         self.tmp = tempfile.TemporaryDirectory(dir=ROOT / "tmp/tests")
@@ -27,7 +27,7 @@ class WorkflowTests(unittest.TestCase):
     def write(self, rows):
         self.input.write_text(''.join(json.dumps(r, ensure_ascii=False) + '\n' for r in rows), encoding="utf-8")
 
-    def post(self, text="我喜欢示例活动", cid="1", **kwargs):
+    def post(self, text="我喜欢音乐节", cid="1", **kwargs):
         return dict(platform="douyin", content_id=cid, text=text, object_type="post", **kwargs)
 
     def process(self, mode="rules", analyzer=None, **kwargs):
@@ -43,40 +43,40 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result["author_url"], "")
 
     def test_promotion_and_interest_are_independent(self):
-        source = normalize(self.post("我喜欢示例活动，也做票务代理"))
+        source = normalize(self.post("我喜欢音乐节，也做票务代理"))
         result = local_analyze(source, self.policy)
         self.assertEqual(result["promotion"], "yes")
         self.assertEqual(result["stance"], "positive")
         self.assertTrue(result["accepted"])
 
     def test_negative_overrides_positive_stance(self):
-        source = normalize(self.post("我喜欢示例活动这句话是假的，我不喜欢示例活动"))
+        source = normalize(self.post("我喜欢音乐节这句话是假的，我不喜欢音乐节"))
         self.assertFalse(local_analyze(source, self.policy)["accepted"])
 
     def test_parent_evidence_cannot_be_attributed_to_reply(self):
         source = normalize(self.post("我也是"))
-        obj = dict(topic="relevant", stance="positive", intent="none", promotion="no", author_role="unknown", evidence={"topic": "示例活动", "stance": "我喜欢示例活动"}, reason="错误继承父作者")
+        obj = dict(topic="relevant", stance="positive", intent="none", promotion="no", author_role="unknown", evidence={"topic": "音乐节", "stance": "我喜欢音乐节"}, reason="错误继承父作者")
         with self.assertRaises(ValueError):
             validate_result(obj, source, self.policy)
         obj.update(evidence={"topic": "我也是", "stance": "我也是"})
         self.assertFalse(validate_result(obj, source, self.policy)["accepted"])
 
     def test_hashtags_not_intent_and_attendance_not_future_plan(self):
-        text = "#示例活动搭子"
+        text = "#音乐节搭子"
         obj = dict(topic="relevant", stance="unclear", intent="seeking_company", promotion="uncertain", author_role="unknown", evidence={"topic": text, "intent": text}, reason="标签")
         self.assertFalse(validate_result(obj, normalize(self.post(text)), self.policy)["accepted"])
-        result = local_analyze(normalize(self.post("我参加了甲类示例活动")), self.policy)
+        result = local_analyze(normalize(self.post("我参加了草莓音乐节")), self.policy)
         self.assertEqual(result["intent"], "attended")
 
     def test_topic_context_origin_and_evidence_array_compatibility(self):
         source = normalize(self.post("我也想去，有结伴的吗"))
         obj = dict(topic="relevant", stance="unclear", intent="seeking_company", promotion="no", author_role="unknown",
-                   evidence={"topic": {"source": "context:0", "quote": "示例活动"}, "intent": ["有结伴的吗", "我也想去"]}, reason="当前作者明确找同行")
-        context = [{"text": "有人去示例活动吗", "source_hash": "parent-hash"}]
+                   evidence={"topic": {"source": "context:0", "quote": "音乐节"}, "intent": ["有结伴的吗", "我也想去"]}, reason="当前作者明确找同行")
+        context = [{"text": "有人去音乐节吗", "source_hash": "parent-hash"}]
         result = validate_result(obj, source, self.policy, context)
         self.assertTrue(result["accepted"])
         self.assertEqual(result["evidence"]["topic"]["source_hash"], "parent-hash")
-        obj["evidence"]["intent"] = {"source": "context:0", "quote": "有人去示例活动吗"}
+        obj["evidence"]["intent"] = {"source": "context:0", "quote": "有人去音乐节吗"}
         with self.assertRaises(ValueError):
             validate_result(obj, source, self.policy, context)
 
@@ -95,7 +95,7 @@ class WorkflowTests(unittest.TestCase):
         self.process(mode="ark", analyzer=lambda r,c: local_analyze(r,self.policy))
         changed = json.loads(json.dumps(self.policy))
         changed["display"]["sort_weights"]["positive"] = 7
-        changed["decision_gates"]["stance_positive"] = ["我喜欢示例活动"]
+        changed["decision_gates"]["stance_positive"] = ["我喜欢音乐节"]
         self.policy_path = self.root / "changed-policy.json"
         self.policy_path.write_text(json.dumps(changed,ensure_ascii=False),encoding="utf-8")
         result = self.process(mode="ark", analyzer=lambda *a: self.fail("decision change called model"))
@@ -106,8 +106,8 @@ class WorkflowTests(unittest.TestCase):
     def test_generic_praise_and_being_alone_are_not_explicit_companion_requests(self):
         source=normalize(self.post("一个人"))
         obj=dict(topic="relevant",stance="unclear",intent="seeking_company",promotion="no",author_role="unknown",
-                 evidence={"topic":{"source":"context:0","quote":"示例活动"},"intent":"一个人"},reason="原模型误判")
-        result=validate_result(obj,source,self.policy,[{"text":"示例活动", "source_hash":"parent"}])
+                 evidence={"topic":{"source":"context:0","quote":"音乐节"},"intent":"一个人"},reason="原模型误判")
+        result=validate_result(obj,source,self.policy,[{"text":"音乐节", "source_hash":"parent"}])
         projected=apply_decision(result,source,self.policy)
         self.assertFalse(projected["accepted"])
         self.assertEqual(projected["intent"],"unclear")
@@ -115,16 +115,16 @@ class WorkflowTests(unittest.TestCase):
 
     def test_context_changes_invalidate_child_cache(self):
         parent = self.post()
-        comment = self.post("我也喜欢示例活动", cid="2", root_id="1")
+        comment = self.post("我也喜欢音乐节", cid="2", root_id="1")
         comment["object_type"] = "comment"
         self.write([parent, comment]); self.process()
-        self.write([dict(parent, text="我想去示例活动"), comment])
+        self.write([dict(parent, text="我想去音乐节"), comment])
         result = self.process()
         self.assertEqual(result["reused_count"], 0)
 
     def test_empty_text_preserved_without_api_or_key(self):
         self.write([self.post("")])
-        with patch("content_screening.rules_v2.ark_analyzer", side_effect=AssertionError("must not read key")):
+        with patch("festival_match.rules_v2.ark_analyzer", side_effect=AssertionError("must not read key")):
             result = self.process(mode="ark")
         self.assertEqual(result["api_calls"], 0)
         self.assertEqual(result["unique_contents"], 1)
@@ -186,7 +186,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(row["result"]["accepted"])
 
     def test_hostile_public_text_is_escaped_in_report(self):
-        self.write([self.post('我喜欢示例活动<script>alert(1)</script>', author='<img onerror=alert(1)>')])
+        self.write([self.post('我喜欢音乐节<script>alert(1)</script>', author='<img onerror=alert(1)>')])
         result = self.process()
         page = Path(result["report"]).read_text(encoding="utf-8")
         self.assertNotIn('<script>alert(1)</script>', page)

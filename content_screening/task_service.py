@@ -40,7 +40,10 @@ class TaskService:
     def __init__(self,store=None):
         from .control_server import RuleStore
         self.store=store or RuleStore();self.root=self.store.root
-        self.runs=self.root/'data/task-runs';self.runs.mkdir(parents=True,exist_ok=True)
+        self.runs=self.root/'data/task-runs'
+        from .runtime_context import current_context
+        if current_context().deployment.get("test_isolated"):
+            self.runs.mkdir(parents=True,exist_ok=True)
 
     def get(self):
         state=self.store.state();state=copy.deepcopy(state)
@@ -274,7 +277,10 @@ class TaskService:
             if spawn:
                 import os
                 with (folder/'worker.log').open('ab') as log:
-                    child=subprocess.Popen([sys.executable,'-X','utf8','-m','content_screening.task_worker','--run-id',run_id],cwd=self.root,stdout=log,stderr=log,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+                    from .runtime_context import current_context
+                context=current_context()
+                child_env=dict(os.environ,TARGET_NPL_DEPLOYMENT=str(context.deployment_path),PYTHONDONTWRITEBYTECODE='1')
+                child=subprocess.Popen([sys.executable,'-X','utf8','-m','content_screening.task_worker','--run-id',run_id],cwd=context.app_root,env=child_env,stdout=log,stderr=log,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
                 atomic_json(folder/'launch.json',{'pid':child.pid})
             return state
 

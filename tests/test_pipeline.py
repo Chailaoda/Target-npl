@@ -5,12 +5,12 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
-from content_screening.pipeline import classify, load_profile, render_report, run
+from festival_match.pipeline import classify, load_profile, render_report, run
 
 
 class PipelineTests(unittest.TestCase):
     def setUp(self):
-        self.profile_path = Path(__file__).resolve().parents[1] / "profiles/legacy.json"
+        self.profile_path = Path(__file__).resolve().parents[1] / "profiles/music_festival.json"
         self.profile = load_profile(self.profile_path)
         self.temp_root = self.profile_path.parents[1] / "tmp" / "tests"
         self.temp_root.mkdir(parents=True, exist_ok=True)
@@ -19,14 +19,14 @@ class PipelineTests(unittest.TestCase):
         return classify({"text": text}, self.profile)
 
     def test_explicit_interest_and_exact_evidence(self):
-        text = "我喜欢示例活动，想去看乐队。"
+        text = "我喜欢音乐节，想去看乐队。"
         result = self.classify(text)
         self.assertTrue(result["accepted"])
         for evidence in result["evidence"]:
             self.assertEqual(text[evidence["start"]:evidence["end"]], evidence["quote"])
 
     def test_negative_spam_and_unrelated(self):
-        for text in ["我不喜欢示例活动", "示例活动低价出票", "我喜欢甲类蛋糕", "示例活动新闻发布了"]:
+        for text in ["我不喜欢音乐节", "音乐节低价出票", "我喜欢草莓蛋糕", "音乐节新闻发布了"]:
             with self.subTest(text=text):
                 self.assertFalse(self.classify(text)["accepted"])
 
@@ -34,7 +34,7 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse(self.classify("我也是")["accepted"])
 
     def test_html_and_unsafe_url_are_not_executable(self):
-        record = {"text": "<script>alert(1)</script>示例活动", "author": "<img onerror=alert(1)>", "url": "javascript:alert(1)", "platform": "demo", "content_id": "1", "synthetic": True}
+        record = {"text": "<script>alert(1)</script>音乐节", "author": "<img onerror=alert(1)>", "url": "javascript:alert(1)", "platform": "demo", "content_id": "1", "synthetic": True}
         page = render_report([(record, classify(record, self.profile))], self.profile, 1, "hash")
         self.assertNotIn("<script>", page)
         self.assertNotIn('href="javascript:', page)
@@ -45,7 +45,7 @@ class PipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=self.temp_root) as folder:
             root = Path(folder)
             source = root / "input.jsonl"
-            source.write_text(json.dumps({"platform": "test", "content_id": "1", "text": "我喜欢示例活动"}, ensure_ascii=False), encoding="utf-8")
+            source.write_text(json.dumps({"platform": "test", "content_id": "1", "text": "我喜欢音乐节"}, ensure_ascii=False), encoding="utf-8")
             db = root / "data.sqlite"
             for _ in range(2):
                 result = run(source, self.profile_path, db, root / "out")
@@ -73,7 +73,7 @@ class PipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=self.temp_root) as folder:
             root = Path(folder)
             source = root / "input.jsonl"
-            source.write_text(json.dumps({"platform": "test", "content_id": "1", "text": "我喜欢示例活动"}, ensure_ascii=False), encoding="utf-8")
+            source.write_text(json.dumps({"platform": "test", "content_id": "1", "text": "我喜欢音乐节"}, ensure_ascii=False), encoding="utf-8")
             calls = []
             def evaluate(record, profile):
                 calls.append(record["content_id"])
@@ -87,7 +87,7 @@ class PipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=self.temp_root) as folder:
             root = Path(folder)
             source = root / "input.jsonl"
-            rows = [{"platform": "test", "content_id": str(i), "text": "我喜欢示例活动"} for i in range(3)]
+            rows = [{"platform": "test", "content_id": str(i), "text": "我喜欢音乐节"} for i in range(3)]
             source.write_text(json.dumps(rows[0], ensure_ascii=False), encoding="utf-8")
             run(source, self.profile_path, root / "data.sqlite", root / "out", classify, {"model": "a"}, 1)
             source.write_text('\n'.join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
@@ -103,7 +103,7 @@ class PipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=self.temp_root) as folder:
             root = Path(folder)
             source = root / "input.csv"
-            source.write_text('platform,content_id,text\ntest,1,我喜欢示例活动\ntest,1,我喜欢示例活动\n', encoding="utf-8-sig")
+            source.write_text('platform,content_id,text\ntest,1,我喜欢音乐节\ntest,1,我喜欢音乐节\n', encoding="utf-8-sig")
             result = run(source, self.profile_path, root / "data.sqlite", root / "out")
             self.assertEqual(result["input_count"], 2)
             self.assertEqual(result["unique_count"], 1)

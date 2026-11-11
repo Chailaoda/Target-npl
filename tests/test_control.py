@@ -12,8 +12,8 @@ from unittest.mock import patch
 import io
 import sys
 
-from content_screening.active_config import active_paths
-from content_screening.control_server import RuleStore,make_server,Conflict
+from festival_match.active_config import active_paths
+from festival_match.control_server import RuleStore,make_server,Conflict
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -24,7 +24,7 @@ class ControlTests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory(dir=ROOT/'tmp/tests');self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name)
         for folder in ('profiles','config'):(self.root/folder).mkdir()
-        for relative in ('profiles/default.json','config/collection.json'):
+        for relative in ('profiles/music_festival_v2.json','config/collection.json'):
             (self.root/relative).write_bytes((ROOT/relative).read_bytes())
         self.store=RuleStore(self.root)
 
@@ -71,16 +71,16 @@ class ControlTests(unittest.TestCase):
         self.store.save(bundle,original['etag'])
         selected=active_paths(self.root)
         source=self.root/'source.jsonl'
-        source.write_text(json.dumps({'platform':'douyin','content_id':'1','text':'我喜欢示例活动'},ensure_ascii=False),encoding='utf-8')
-        from content_screening.workflow import main
+        source.write_text(json.dumps({'platform':'douyin','content_id':'1','text':'我喜欢音乐节'},ensure_ascii=False),encoding='utf-8')
+        from festival_match.workflow import main
         output=io.StringIO()
         args=['workflow','run','--input',str(source),'--db',str(self.root/'data.sqlite'),'--output',str(self.root/'out')]
-        with patch('content_screening.active_config.active_paths',return_value=selected),patch.object(sys,'argv',args),patch('sys.stdout',output):
+        with patch('festival_match.active_config.active_paths',return_value=selected),patch.object(sys,'argv',args),patch('sys.stdout',output):
             self.assertEqual(main(),0)
         manifest=json.loads(output.getvalue())
         record=json.loads(Path(manifest['export']).read_text(encoding='utf-8'))
         self.assertEqual(record['result']['score'],7)
-        self.assertEqual(json.loads((self.root/'profiles/default.json').read_text(encoding='utf-8-sig'))['display']['sort_weights']['positive'],original['bundle']['policy']['display']['sort_weights']['positive'])
+        self.assertEqual(json.loads((self.root/'profiles/music_festival_v2.json').read_text(encoding='utf-8-sig'))['display']['sort_weights']['positive'],70)
 
     def test_local_api_validation_preview_and_origin_controls(self):
         server=make_server(0,self.store);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
@@ -92,7 +92,7 @@ class ControlTests(unittest.TestCase):
             req=urllib.request.Request(url+route,data=json.dumps(body).encode(),headers={'Content-Type':'application/json','Origin':origin,'X-Control-Token':token})
             return opener.open(req)
         with request('/api/validate',{'bundle':state['bundle']}) as response:self.assertTrue(json.load(response)['valid'])
-        with request('/api/preview',{'policy':state['bundle']['policy'],'text':'我喜欢示例活动'}) as response:self.assertTrue(json.load(response)['accepted'])
+        with request('/api/preview',{'policy':state['bundle']['policy'],'text':'我喜欢音乐节'}) as response:self.assertTrue(json.load(response)['accepted'])
         for origin,token in (('https://evil.example',state['token']),(url,'bad-token')):
             with self.assertRaises(urllib.error.HTTPError) as error:request('/api/save',{'bundle':state['bundle'],'etag':state['etag']},origin,token)
             self.assertEqual(error.exception.code,403)

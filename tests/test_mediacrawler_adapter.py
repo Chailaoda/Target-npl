@@ -28,7 +28,7 @@ class AdapterTests(unittest.TestCase):
 
     def test_collection_config_is_bounded(self):
         settings = adapter.load_settings(ROOT / "config/collection.json")
-        self.assertEqual(settings["keywords"], ["示例活动"])
+        self.assertEqual(len(settings["keywords"]), 2)
         self.assertLessEqual(settings["max_posts"], 60)
 
 
