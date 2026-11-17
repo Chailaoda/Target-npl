@@ -12,6 +12,15 @@ The scheduler does NOT go through TaskService — it directly uses
 collect_selected() and workflow.run(), managing its own lifecycle.
 It respects the existing single-task mutex: if a manual task is running
 (via Web UI or CLI), the scheduler skips that tick.
+
+Known limitations (deferred to future iterations):
+- #1: PID-based mutex has race windows; needs shared atomic lock with TaskService
+- #2: Dedup commit and pending queue save are not atomic; crash between them
+      loses records; needs unified SQLite transaction or recovery log
+- #4: Large backlogs exceeding max_calls are retried whole; needs budget-based
+      batch splitting
+- #7: filter_unseen → ingest_raw TOCTOU under concurrent callers; needs
+      atomic claim mechanism
 """
 from __future__ import annotations
 
@@ -98,12 +107,10 @@ class Scheduler:
         self.state = self._load_state()
         self.dedup = open_index(self.root / "data/dedup.sqlite3")
 
-    def _load_state(self):
-        if self.state_path.exists():
-            try:
-                return json.loads(self.state_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                pass
+    _REQUIRED_KEYS = {"platforms", "round", "pending_records", "pending_raw_files",
+                       "last_analysis_round"}
+
+    def _new_state(self):
         return {
             "platforms": {},
             "round": 0,
@@ -112,6 +119,19 @@ class Scheduler:
             "last_analysis_round": 0,
             "created_at": _utcnow(),
         }
+
+    def _load_state(self):
+        if self.state_path.exists():
+            try:
+                data = json.loads(self.state_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning("corrupt state file, starting fresh: %s", e)
+                return self._new_state()
+            if not isinstance(data, dict) or not self._REQUIRED_KEYS.issubset(data):
+                logger.warning("state file missing required keys, starting fresh")
+                return self._new_state()
+            return data
+        return self._new_state()
 
     def _save(self):
         self.state["updated_at"] = _utcnow()
@@ -220,13 +240,19 @@ class Scheduler:
         merged_dir.mkdir(parents=True, exist_ok=True)
         merged_raw = merged_dir / "raw.jsonl"
 
+        missing = []
         with merged_raw.open("w", encoding="utf-8") as out:
             for raw_path in pending:
                 p = Path(raw_path)
-                if p.exists() and p.stat().st_size > 0:
-                    out.write(p.read_text(encoding="utf-8"))
-                    if not p.read_text(encoding="utf-8").endswith("\n"):
-                        out.write("\n")
+                if not p.exists() or p.stat().st_size == 0:
+                    missing.append(raw_path)
+                    continue
+                content = p.read_text(encoding="utf-8")
+                out.write(content)
+                if not content.endswith("\n"):
+                    out.write("\n")
+        if missing:
+            logger.warning("missing or empty pending files: %s", missing)
 
         if merged_raw.stat().st_size == 0:
             self.state["pending_raw_files"] = []
@@ -253,12 +279,17 @@ class Scheduler:
             task=task, config_revision=snapshot["revision"],
         )
 
-        self.state["pending_raw_files"] = []
-        self.state["pending_records"] = 0
+        status = result.get("status", "")
+        if status in ("completed", ""):
+            self.state["pending_raw_files"] = []
+            self.state["pending_records"] = 0
+        else:
+            logger.warning("analysis returned status=%s, keeping pending queue for retry", status)
+
         self.state["last_analysis_round"] = self.state["round"]
         self._save()
-        logger.info("analysis done: %d candidates, %d API calls",
-                     result.get("candidate_contents", 0), result.get("api_calls", 0))
+        logger.info("analysis done: status=%s, %d candidates, %d API calls",
+                     status, result.get("candidate_contents", 0), result.get("api_calls", 0))
         return result
 
     # ---- main loop ---------------------------------------------------------
@@ -279,10 +310,15 @@ class Scheduler:
         if platform:
             try:
                 collection = self.run_collection(platform)
-            except Exception as e:
-                logger.error("collection failed for %s: %s", platform, e)
+            except Exception:
+                logger.exception("collection failed for %s", platform)
                 ps = self._ps(platform)
+                ps["last_run_at"] = _utcnow()
                 ps["consecutive_failures"] += 1
+                if ps["consecutive_failures"] >= self.config["max_consecutive_failures"]:
+                    ps["cooldown_until_round"] = self.state["round"] + self.config["cooldown_rounds"]
+                    logger.warning("%s entered cooldown after %d consecutive failures",
+                                   platform, ps["consecutive_failures"])
                 self._save()
         else:
             logger.info("no platform available this round")
@@ -299,14 +335,22 @@ class Scheduler:
                 "pending": self.state["pending_records"],
                 "dedup": dedup_stats(self.dedup)}
 
+    def close(self):
+        try:
+            self.dedup.close()
+        except Exception:
+            pass
+        self._save()
+
     def run(self, interval=None):
         interval = interval or self.config["interval_seconds"]
-        logger.info("scheduler starting (interval=%ds, analysis_threshold=%d)",
-                     interval, self.config["analysis_threshold"])
-        logger.info("dedup index: %s", dedup_stats(self.dedup))
 
         from .runtime_context import current_context, set_context
         set_context(current_context())
+
+        logger.info("scheduler starting (interval=%ds, analysis_threshold=%d)",
+                     interval, self.config["analysis_threshold"])
+        logger.info("dedup index: %s", dedup_stats(self.dedup))
 
         try:
             while True:
@@ -316,14 +360,13 @@ class Scheduler:
                                 result["round"], result.get("pending", self.state["pending_records"]))
                 except KeyboardInterrupt:
                     raise
-                except Exception as e:
-                    logger.error("tick failed: %s", e)
+                except Exception:
+                    logger.exception("tick failed")
                 time.sleep(interval)
         except KeyboardInterrupt:
             logger.info("scheduler stopped")
         finally:
-            self.dedup.close()
-            self._save()
+            self.close()
 
 
 def main():
@@ -337,8 +380,10 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s",
                         handlers=[logging.StreamHandler(sys.stderr)])
 
-    from .active_config import ROOT
-    root = ROOT
+    from .runtime_context import current_context, set_context
+    ctx = current_context()
+    set_context(ctx)
+    root = Path(ctx.state_root)
 
     if args.status:
         state_path = root / "data/scheduler/state.json"
