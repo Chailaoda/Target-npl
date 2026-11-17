@@ -6,7 +6,10 @@ from .pipeline import fingerprint
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def active_snapshot(root=ROOT):
+def active_snapshot(root=None):
+    if root is None:
+        from .runtime_context import current_context
+        root=current_context().state_root
     root = Path(root)
     pointer = root / "config/control-active.json"
     if not pointer.exists():
@@ -24,6 +27,6 @@ def active_snapshot(root=ROOT):
     return {"revision":revision,"policy_path":folder/"policy.json","collection_path":folder/"collection.json","bundle":bundle}
 
 
-def active_paths(root=ROOT):
+def active_paths(root=None):
     snapshot=active_snapshot(root)
     return snapshot['policy_path'],snapshot['collection_path']

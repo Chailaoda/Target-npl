@@ -1,0 +1,8 @@
+{"platform":"synthetic","content_id":"demo-01","author":"虚构样例A","text":"我喜欢音乐节，尤其喜欢现场乐队的气氛。","url":"https://example.invalid/demo-01","synthetic":true}
+{"platform":"synthetic","content_id":"demo-02","author":"虚构样例B","text":"准备去今年的草莓音乐节，有人一起吗？","synthetic":true}
+{"platform":"synthetic","content_id":"demo-03","author":"虚构样例C","text":"音乐节找同行搭子，想一起听现场。","synthetic":true}
+{"platform":"synthetic","content_id":"demo-04","author":"虚构样例D","text":"我不喜欢音乐节，人太多了。","synthetic":true}
+{"platform":"synthetic","content_id":"demo-05","author":"虚构样例E","text":"这盒草莓很好吃。","synthetic":true}
+{"platform":"synthetic","content_id":"demo-06","author":"虚构样例F","text":"音乐节低价出票，票务代理。","synthetic":true}
+{"platform":"synthetic","content_id":"demo-07","author":"虚构样例G","text":"看到一条音乐节新闻。","synthetic":true}
+{"platform":"synthetic","content_id":"demo-08","author":"虚构样例H","text":"我也是！","parent_id":"demo-01","synthetic":true}

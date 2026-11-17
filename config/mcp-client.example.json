@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "target-npl-screening": {
+      "command": "E:\\workplace\\Target-npl\\.venv\\Scripts\\python.exe",
+      "args": [
+        "-X",
+        "utf8",
+        "E:\\workplace\\Target-npl\\scripts\\task_mcp.py"
+      ]
+    }
+  }
+}

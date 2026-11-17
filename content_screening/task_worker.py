@@ -13,7 +13,10 @@ from .task_contract import validate_execution
 from .pipeline import fingerprint
 
 
-def execute(run_id,root=ROOT):
+def execute(run_id,root=None):
+    from .runtime_context import current_context,set_context
+    context=current_context();set_context(context)
+    root=Path(root) if root is not None else context.state_root
     from .control_server import RuleStore,validate_bundle
     service=TaskService(RuleStore(root));folder=service.runs/run_id
     request=json.loads((folder/'request.json').read_text(encoding='utf-8'));bundle=request['bundle']
@@ -23,7 +26,7 @@ def execute(run_id,root=ROOT):
     def update(**values):
         state.update(values,updated_at=datetime.now(timezone.utc).isoformat());atomic_json(folder/'status.json',state)
     update(status='running',phase='preparing',pid=os.getpid())
-    collection_incomplete=False;incomplete_platforms=[];collection_status=None
+    collection_incomplete=False;incomplete_platforms=[];collection_status=None;collection_warnings=[]
     try:
         for name in ('policy','collection','task'):atomic_json(folder/f'{name}.json',bundle[name])
         execution=bundle['task']['execution']
@@ -32,6 +35,7 @@ def execute(run_id,root=ROOT):
             update(phase='collecting')
             from .multi_collection import collect_selected
             data=collect_selected(bundle['collection'],folder,root)
+            collection_warnings=data.get('warnings') or []
             platform_statuses=data.get('platform_statuses',[])
             if any(p.get('status')=='needs_user_login' for p in platform_statuses):
                 from .platforms import open_login
@@ -55,17 +59,21 @@ def execute(run_id,root=ROOT):
                                  '、'.join(str(x) for x in incomplete_platforms)))
                     update(status='running',phase='analyzing',platform_statuses=platform_statuses,
                            collection_status=collection_status,incomplete_platforms=incomplete_platforms,
-                           collection_incomplete=collection_incomplete,message=message)
+                           collection_incomplete=collection_incomplete,collection_warnings=collection_warnings,
+                           collection_warning_count=len(collection_warnings),message=message)
                 else:
                     update(status='needs_user_login' if data['status']=='needs_user_login' else 'failed',
                            phase='collection_stopped',collection_status=collection_status,
                            platform_statuses=platform_statuses,incomplete_platforms=incomplete_platforms,
-                           collection_incomplete=collection_incomplete);return state
+                           collection_incomplete=collection_incomplete,collection_warnings=collection_warnings,
+                           collection_warning_count=len(collection_warnings));return state
             else:
                 source=Path(data['raw_file'])
-        update(phase='analyzing',dataset_id=source.parent.name,input_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+        update(phase='analyzing',dataset_id=source.parent.name,input_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+               collection_warnings=collection_warnings,collection_warning_count=len(collection_warnings))
         from .workflow import run
-        result=run(source,folder/'policy.json',Path(root)/'data/screening.sqlite3',Path(root)/'output/task-runs'/run_id,
+        from .db_access import resolve_db
+        result=run(source,folder/'policy.json',resolve_db(),Path(root)/'output/task-runs'/run_id,
                    execution['mode'],Path(root)/'config/connection.json',execution['max_api_calls'],task=bundle['task'],config_revision=request['revision'],on_start=lambda job_id:update(analysis_job_id=job_id))
         analysis_status=result['status']
         analysis_ok=analysis_status in ('completed','completed_empty','completed_with_review')

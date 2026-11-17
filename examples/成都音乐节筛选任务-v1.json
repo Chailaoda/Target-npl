@@ -1,0 +1,171 @@
+{
+  "policy": {
+    "schema_version": 2,
+    "id": "music_festival",
+    "name": "音乐节公开兴趣线索",
+    "topic_patterns": [
+      "音乐节",
+      "music\\s+festival"
+    ],
+    "dimensions": {
+      "topic": [
+        "relevant",
+        "unrelated",
+        "uncertain"
+      ],
+      "stance": [
+        "positive",
+        "negative",
+        "neutral",
+        "unclear"
+      ],
+      "intent": [
+        "seeking_company",
+        "planning",
+        "attended",
+        "none",
+        "unclear"
+      ],
+      "promotion": [
+        "yes",
+        "no",
+        "uncertain"
+      ],
+      "author_role": [
+        "individual",
+        "organizer",
+        "unknown"
+      ]
+    },
+    "acceptance": {
+      "stances": [],
+      "intents": [
+        "seeking_company"
+      ]
+    },
+    "decision_gates": {
+      "promotion_yes": [
+        "出票|卖票|售票|票务代理|代抢|低价|返佣"
+      ],
+      "author_role_individual": [
+        "(?:我是|本人是).{0,8}(?:观众|乐迷|个人|爱好者)",
+        "我.{0,3}一个人"
+      ],
+      "author_role_organizer": [
+        "(?:我是|我们是).{0,8}(?:主办方|组织者|票务代理)"
+      ],
+      "stance_positive": [
+        "(?:我|本人).{0,8}(?:喜欢|热爱|最爱).{0,10}音乐节",
+        "音乐节.{0,10}(?:我喜欢|我最爱|好喜欢)",
+        "想去.{0,8}音乐节"
+      ],
+      "intent_seeking_company": [
+        "(?:找|求|约|蹲).{0,6}(?:搭子|同行|伙伴)",
+        "(?:有没有|有人|有).{0,12}(?:一起|结伴|搭子|组队|同行).{0,5}(?:吗|么|呀|的|玩)?",
+        "(?:欢迎|组个团).{0,16}一起",
+        "一起.{0,10}(?:喊我|找我)"
+      ],
+      "intent_planning": [
+        "(?:想去|要去|准备|打算|计划|决定|下一站|买.{0,3}票)"
+      ],
+      "intent_attended": [
+        "(?:我|我们|本人).{0,8}(?:去过|参加了|看了|在现场|到现场)",
+        "(?:去过|参加过|参加了).{0,10}音乐节",
+        "现场.{0,12}实现了"
+      ],
+      "cancelled_plan": [
+        "退票|去不了|不去了|没去成|无法参加|取消计划"
+      ]
+    },
+    "ambiguous_reply_patterns": [
+      "^(?:我也是|同上|同感|一样|是的|对|嗯|哈哈|[\\W_])+$"
+    ],
+    "rules": {
+      "stance_negative": [
+        "(?:不喜欢|讨厌|不爱).{0,8}音乐节",
+        "音乐节.{0,8}(?:不喜欢|不感兴趣)"
+      ],
+      "stance_positive": [
+        "(?:我|本人).{0,6}(?:喜欢|热爱|最爱).{0,8}音乐节"
+      ],
+      "intent_seeking_company": [
+        "有.{0,8}(?:结伴|同行|一起).{0,5}(?:吗|么)",
+        "(?:找|求).{0,6}(?:搭子|同行)",
+        "欢迎.{0,12}一起.{0,12}音乐节",
+        "有人一起",
+        "约伴"
+      ],
+      "intent_planning": [
+        "(?:准备|打算|计划|想去|要去|已买|买了).{0,16}(?:票|音乐节)",
+        "音乐节.{0,8}(?:买好票|准备去|想去)"
+      ],
+      "intent_attended": [
+        "(?:我|我们|本人).{0,8}(?:去过|参加了|看了).{0,12}音乐节"
+      ],
+      "promotion_yes": [
+        "售票|代抢|低价出票|票务代理|返佣"
+      ],
+      "author_role_organizer": [
+        "(?:我是|我们是).{0,8}(?:主办方|组织者|票务代理)"
+      ]
+    },
+    "display": {
+      "sort_weights": {
+        "seeking_company": 90,
+        "planning": 80,
+        "attended": 70,
+        "positive": 70
+      },
+      "include_related": true
+    }
+  },
+  "collection": {
+    "schema_version": 1,
+    "platform": "douyin",
+    "keywords": [
+      "成都 音乐节 搭子",
+      "成都 音乐节 想去",
+      "成都 音乐节 同行"
+    ],
+    "pages_per_keyword": 1,
+    "posts_per_keyword": 5,
+    "max_posts": 10,
+    "comments_per_post": 3,
+    "request_interval_seconds": 3,
+    "max_requests": 14,
+    "timeout_seconds": 180,
+    "proxy_mode": "direct"
+  },
+  "task": {
+    "schema_version": 1,
+    "description": "帮我找最近想去成都音乐节、正在找同行搭子的人，排除卖票和推广留言。",
+    "scope": {
+      "locations": [
+        "成都"
+      ],
+      "recent_days": 30,
+      "published_after": null,
+      "published_before": null
+    },
+    "exclusions": {
+      "promotions": true,
+      "terms": []
+    },
+    "execution": {
+      "source": "existing",
+      "dataset_id": "latest",
+      "mode": "ark",
+      "max_api_calls": 40
+    },
+    "assumptions": [
+      "“最近”未指定天数，按近30天处理（task.scope.recent_days=30），基于对象发布时间；发布时间缺失的保留待核对，不冒充匹配。",
+      "抖音无原生地域与时间过滤，成都地点与近30天均通过 task.scope 后处理实现；地点指内容所指活动地点（本人正文或关联原帖），不代表作者当前位置。",
+      "关键词为召回手段而非地域过滤，成都相关音乐节内容仍需 scope 地点后处理确认。",
+      "仅保留正在找同行搭子的意图（seeking_company），不再接受 planning/attended；立场不设限，避免误杀中性求搭子表达。",
+      "卖票与推广留言通过 task.exclusions.promotions=true 排除，未新增字面排除词。",
+      "采集额度、请求频率、直连模式与执行来源保持现有设置不变。"
+    ],
+    "unresolved": [],
+    "human_overrides": []
+  }
+}

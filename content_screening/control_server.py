@@ -11,14 +11,14 @@ import secrets
 import subprocess
 import sys
 import threading
-from urllib.parse import urlsplit,unquote
+from urllib.parse import urlsplit,unquote,parse_qs
 import uuid
 
 from .active_config import ROOT,active_snapshot
 from .pipeline import fingerprint
 from .rules_v2 import validate_policy,analysis_policy
-from scripts.mediacrawler_collect import validate_settings
 from .task_contract import validate_task,changed_paths,default_task
+from .runtime_context import RuntimeContext,current_context,set_context,preflight
 
 
 class Conflict(ValueError):
@@ -27,37 +27,50 @@ class Conflict(ValueError):
 
 @contextmanager
 def write_lock(path):
-    with path.open('a+b') as f:
-        if f.tell()==0:f.write(b'0');f.flush()
-        f.seek(0)
-        if os.name=='nt':
-            import msvcrt
-            msvcrt.locking(f.fileno(),msvcrt.LK_LOCK,1)
-        else:
-            import fcntl
-            fcntl.flock(f.fileno(),fcntl.LOCK_EX)
+    import time
+    deadline=time.monotonic()+10
+    while True:
+        stream=None
+        try:
+            stream=path.open('a+b')
+            if stream.tell()==0:stream.write(b'0');stream.flush()
+            stream.seek(0)
+            if os.name=='nt':
+                import msvcrt
+                msvcrt.locking(stream.fileno(),msvcrt.LK_LOCK,1)
+            else:
+                import fcntl
+                fcntl.flock(stream.fileno(),fcntl.LOCK_EX)
+            break
+        except (PermissionError,OSError):
+            if stream is not None:stream.close()
+            if time.monotonic()>=deadline:raise
+            time.sleep(.05)
+    with stream:
         try:yield
         finally:
-            f.seek(0)
-            if os.name=='nt':msvcrt.locking(f.fileno(),msvcrt.LK_UNLCK,1)
-            else:fcntl.flock(f.fileno(),fcntl.LOCK_UN)
+            stream.seek(0)
+            if os.name=='nt':msvcrt.locking(stream.fileno(),msvcrt.LK_UNLCK,1)
+            else:fcntl.flock(stream.fileno(),fcntl.LOCK_UN)
 
 
 def validate_bundle(bundle):
     if not isinstance(bundle,dict) or not {'policy','collection'}<=set(bundle) or set(bundle)-{'policy','collection','task'}:
         raise ValueError("导入内容应包含 policy 与 collection")
     validate_policy(bundle["policy"])
+    from scripts.mediacrawler_collect import validate_settings
     validate_settings(bundle["collection"])
     if 'task' in bundle:validate_task(bundle['task'])
     return bundle
 
 
 class RuleStore:
-    def __init__(self,root=ROOT):
-        self.root=Path(root)
+    def __init__(self,root=None):
+        self.root=Path(root) if root is not None else current_context().state_root
         self.lock=threading.RLock()
         self.versions=self.root/'data/control/versions'
-        self.versions.mkdir(parents=True,exist_ok=True)
+        if current_context().deployment.get("test_isolated"):
+            self.versions.mkdir(parents=True,exist_ok=True)
 
     def state(self):
         with self.lock:
@@ -115,14 +128,17 @@ class RuleStore:
         return bundle
 
 
-def make_server(port=8766,store=None):
-    store=store or RuleStore()
+def make_server(port=8766,store=None,context=None):
+    context=context or current_context()
+    store=store or RuleStore(context.state_root)
     from .task_service import TaskService
     from .task_schema import task_schema
     from .task_contract import capabilities
     tasks=TaskService(store)
+    from .interest_service import InterestService
+    interests=InterestService(context)
     token=secrets.token_urlsafe(32)
-    dist=ROOT/'control-web/dist'
+    dist=context.app_root/'control-web/dist'
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*args):
             pass
@@ -142,10 +158,38 @@ def make_server(port=8766,store=None):
             return self.headers.get('Host')==f'127.0.0.1:{self.server.server_port}'
 
         def do_GET(self):
+            set_context(self.server.runtime_context)
             if not self.allowed_host():
                 return self.send(403,{"error":"仅允许本机控制端访问"})
             route=urlsplit(self.path).path
+            query=parse_qs(urlsplit(self.path).query)
             try:
+                if route=='/api/interests/topics':
+                    return self.send(200,{'items':interests.recent_topics(query.get('limit',[8])[0])})
+                if route=='/api/accounts':
+                    return self.send(200,interests.accounts(query.get('keyword',[''])[0],query.get('limit',[50])[0],query.get('offset',[0])[0]))
+                if route=='/api/interests/search':
+                    if 'topic' not in query:raise ValueError('必须提供兴趣主题')
+                    allowed={'topic','min_score','platform','window','min_evidence','stance','sort','limit','offset'}
+                    if set(query)-allowed:raise ValueError('兴趣筛选参数无效')
+                    options={key:query[key][0] for key in allowed-{'topic'} if key in query}
+                    return self.send(200,interests.search(query['topic'][0],**options))
+                if route=='/api/interests/analyze':
+                    return self.send(200,interests.topic_status(query.get('topic',[''])[0]))
+                if route.startswith('/api/accounts/'):
+                    parts=route.split('/')
+                    if len(parts)<4 or not parts[3]:return self.send(404,{'error':'账号不存在'})
+                    key=unquote(parts[3])
+                    if len(parts)==4:
+                        result=interests.account(key)
+                        return self.send(200,result) if result else self.send(404,{'error':'账号不存在或没有可靠公开身份'})
+                    if len(parts)==5 and parts[4]=='interests':
+                        result=interests.account(key)
+                        return self.send(200,{'account_key':key,'items':result['interests']}) if result else self.send(404,{'error':'账号不存在'})
+                    if len(parts)==7 and parts[4]=='interests' and parts[6]=='evidence':
+                        if not interests.account(key):return self.send(404,{'error':'账号不存在'})
+                        return self.send(200,interests.evidence(key,unquote(parts[5]),query.get('window',['all'])[0]))
+                    return self.send(404,{'error':'人物接口不存在'})
                 if route=='/api/platforms':
                     from .platforms import catalog
                     return self.send(200,catalog(store.root))
@@ -159,7 +203,12 @@ def make_server(port=8766,store=None):
                     expected=(store.root/'output/task-runs'/run_id).resolve()
                     if not report.is_relative_to(expected) or not report.is_file():return self.send(404,{'error':'报告尚未生成'})
                     return self.send(200,report.read_bytes(),'text/html; charset=utf-8',report=True)
-                if route=='/api/identity':return self.send(200,{"service":"target-npl-rule-control","version":1})
+                if route=='/api/identity':
+                    from .runtime_context import RuntimeErrorBase
+                    try:
+                        return self.send(200,preflight(context))
+                    except RuntimeErrorBase as error:
+                        return self.send(503,{"error":str(error),"code":error.code})
                 if route in ('/api/state','/api/tasks/state'):return self.send(200,dict(tasks.get(),token=token))
                 if route=='/api/tasks/schema':return self.send(200,task_schema())
                 if route=='/api/tasks/capabilities':return self.send(200,capabilities())
@@ -175,6 +224,7 @@ def make_server(port=8766,store=None):
             except OSError:self.send(404,{"error":"配置文件不存在或暂不可读"})
 
         def do_POST(self):
+            set_context(self.server.runtime_context)
             if not self.allowed_host() or self.headers.get('Origin')!=f'http://127.0.0.1:{self.server.server_port}' or not secrets.compare_digest(self.headers.get('X-Control-Token',''),token):
                 return self.send(403,{"error":"控制端来源或会话校验失败"})
             try:
@@ -183,6 +233,15 @@ def make_server(port=8766,store=None):
                     raise ValueError("仅接受不超过 256KB 的 JSON")
                 obj=json.loads(self.rfile.read(size))
                 route=urlsplit(self.path).path
+                if route=='/api/interests/analyze':
+                    if not isinstance(obj,dict) or set(obj)-{'topic','aliases','exclude_terms','description','account_key'}:
+                        raise ValueError('兴趣分析参数无效')
+                    return self.send(200,interests.analyze(**obj))
+                if route=='/api/interests/evidence-feedback':
+                    allowed={'evidence_id','action','note','profile_version'}
+                    if not isinstance(obj,dict) or not {'evidence_id','action'} <= set(obj) or set(obj)-allowed:
+                        raise ValueError('证据反馈参数无效')
+                    return self.send(200,interests.feedback(**obj))
                 if route=='/api/platforms/open-login':
                     from .platforms import open_login
                     if not isinstance(obj,dict) or set(obj)!={'platform'}:raise ValueError('平台参数无效')
@@ -214,7 +273,7 @@ def make_server(port=8766,store=None):
                     validate_policy(obj['policy'])
                     if not isinstance(obj.get('text'),str) or not 1<=len(obj['text'])<=4000:raise ValueError("测试文本长度应为 1–4000 字符")
                     preview_input={'policy':obj['policy'],'text':obj['text'],'context_text':obj.get('context_text'),'task':obj.get('task')}
-                    result=subprocess.run([sys.executable,'-X','utf8','-m','content_screening.rule_preview'],input=json.dumps(preview_input,ensure_ascii=False).encode('utf-8'),capture_output=True,cwd=ROOT,timeout=4)
+                    result=subprocess.run([sys.executable,'-X','utf8','-m','content_screening.rule_preview'],input=json.dumps(preview_input,ensure_ascii=False).encode('utf-8'),capture_output=True,cwd=context.app_root,env=dict(os.environ,TARGET_NPL_DEPLOYMENT=str(context.deployment_path),PYTHONDONTWRITEBYTECODE='1'),timeout=4)
                     payload=json.loads(result.stdout)
                     return self.send(200 if result.returncode==0 else 400,payload)
                 return self.send(404,{"error":"接口不存在"})
@@ -223,6 +282,7 @@ def make_server(port=8766,store=None):
             except (ValueError,TypeError,KeyError) as error:self.send(400,{"error":str(error)})
             except OSError:self.send(500,{"error":"配置暂未保存，请稍后重试；原生效版本未改变"})
     server=ThreadingHTTPServer(('127.0.0.1',port),Handler)
+    server.runtime_context=context
     server.daemon_threads=True
     return server
 
@@ -230,8 +290,16 @@ def make_server(port=8766,store=None):
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--port',type=int,default=8766)
+    parser.add_argument('--deployment')
+    parser.add_argument('--preflight',action='store_true')
     args=parser.parse_args()
-    server=make_server(args.port)
+    context=RuntimeContext.load(args.deployment)
+    if args.preflight:
+        print(json.dumps(preflight(context),ensure_ascii=False,indent=2));return
+    identity=preflight(context);set_context(context)
+    if args.port!=context.deployment['port']:
+        raise SystemExit('端口必须与隔离部署清单一致')
+    server=make_server(args.port,context=context)
     print(f'规则控制端：http://127.0.0.1:{server.server_port}',flush=True)
     try:server.serve_forever()
     except KeyboardInterrupt:pass

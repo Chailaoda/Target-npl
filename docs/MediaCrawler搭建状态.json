@@ -1,0 +1,19 @@
+{
+  "repository": "https://github.com/NanmiCoder/MediaCrawler",
+  "commit": "68d9ef1c1da22eab75940dfd7cec259907006538",
+  "environment": "E:\\workplace\\Target-npl\\vendor\\MediaCrawler\\.venv",
+  "lock_sha256": "16034a88f3981a63f9667b202e348372b4f1571cbd5aeb03530c7027622d22d6",
+  "dependency_sync": "passed, 90 packages, frozen lock",
+  "cli_help_exit_code": 0,
+  "cli_evidence": "output/mediacrawler-cli-check.txt",
+  "platform_collection_verified": true,
+  "direct_http_channel_verified": true,
+  "other_environments_modified": false,
+  "collection_method": "pinned_upstream_Douyin_client_with_project_direct_adapter",
+  "upstream_source_modified": false,
+  "latest_collection": "data/collections/20261029T150944965516Z",
+  "latest_workflow_job": "7e8196ba999e48ccaa5375865b1184ca",
+  "output_contract": "forced_function_tool_parameters_with_local_validation",
+  "identity_mode": "upstream_anonymized",
+  "current_delivery": "docs/MediaCrawler主线交付与操作说明.md"
+}

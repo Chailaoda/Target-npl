@@ -41,6 +41,10 @@ def make_opener(mode, hosts):
 
 
 def request(url, *, hosts, mode, payload=None, key=None, timeout=20, max_bytes=2_000_000):
+    from .runtime_context import current_context
+    context=current_context()
+    if not context.deployment.get("test_isolated"):
+        context.require_external('network')
     check_url(url, hosts)
     headers = {"User-Agent": "FestivalMatch/0.1", "Accept": "application/json,text/html"}
     if key:

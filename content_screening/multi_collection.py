@@ -30,11 +30,15 @@ def collection_command(root,python,script,config,receipt,progress):
 
 
 def collect_selected(settings,folder,root):
+    from .runtime_context import current_context
+    context=current_context()
+    if not context.deployment.get("test_isolated"):
+        context.require_external('collection')
     root=Path(root);folder=Path(folder);platforms=selected(settings)
     dataset=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     job=root/'data/collections'/dataset;job.mkdir(parents=True,exist_ok=False)
     raw=job/'raw.jsonl';raw.touch()
-    status={'status':'running','settings':settings,'records':0,'posts':0,'comments':0,'requests':0,'errors':[],
+    status={'status':'running','settings':settings,'records':0,'posts':0,'comments':0,'requests':0,'errors':[],'warnings':[],'warning_count':0,
         'raw_file':str(raw),'proxy_mode':'direct','identity_mode':'unresolved',
         'platform_identity_modes':{},'incomplete_platforms':[],
         'created_at_utc':datetime.now(timezone.utc).isoformat(),'platform_statuses':[],'aggregate':True}
@@ -89,6 +93,7 @@ def collect_selected(settings,folder,root):
             conflict=exit_code!=0 and declared_ok
             child_ok=exit_code==0 and declared_ok
             effective='failed' if conflict else receipt_status
+            child_warnings=data.get('warnings') or []
             merged=0
             if child_ok:
                 # Parse and validate the WHOLE child file in memory before
@@ -113,6 +118,9 @@ def collect_selected(settings,folder,root):
                 if merged:
                     status['platform_identity_modes'][platform]=(
                         mode if mode in TRUSTED_IDENTITY_MODES else 'unresolved')
+                for warning in child_warnings:
+                    if isinstance(warning, dict):
+                        status['warnings'].append(dict(warning, platform=platform))
             # Requests are real traffic even when the child failed; keep them
             # for the shared budget, but never count unmerged posts/comments.
             status['requests']+=data.get('requests',0)
@@ -120,6 +128,7 @@ def collect_selected(settings,folder,root):
                 'platform':platform,'status':effective,
                 'records':data.get('records',0) if child_ok else 0,
                 'requests':data.get('requests',0),
+                'warning_count':len(child_warnings) if child_ok else 0,
                 'dataset_id':Path(data['raw_file']).parent.name,
                 'exit_code':exit_code,'receipt_status':receipt_status})
             if not child_ok:
@@ -152,6 +161,6 @@ def collect_selected(settings,folder,root):
         # 有数据但并非所有平台都成功：绝不把不完整批次报告为成功。
         # 上层可明确看到 partial + incomplete_platforms，再决定是否分析已成功部分。
         status['status']='partial'
-    status.update(raw_sha256=hashlib.sha256(raw.read_bytes()).hexdigest(),finished_at_utc=datetime.now(timezone.utc).isoformat())
+    status.update(warning_count=len(status['warnings']),raw_sha256=hashlib.sha256(raw.read_bytes()).hexdigest(),finished_at_utc=datetime.now(timezone.utc).isoformat())
     status.pop('active_platform',None);save()
     return status
