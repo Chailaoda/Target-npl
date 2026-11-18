@@ -1,56 +1,36 @@
-"""Persistent scheduler: rotates platforms, deduplicates, decouples collection/analysis.
+"""轮转采集平台并将采集原文写入分析队列。
 
-Usage:
-    python -m content_screening.scheduler [--interval 900] [--analysis-threshold 50]
-
-The scheduler runs as a long-lived process. Each "tick" picks one platform,
-runs a small collection batch, deduplicates the results against the global
-index, and queues the new records for analysis. Analysis runs when enough new
-records accumulate or after a configurable number of collection rounds.
-
-The scheduler does NOT go through TaskService — it directly uses
-collect_selected() and workflow.run(), managing its own lifecycle.
-It respects the existing single-task mutex: if a manual task is running
-(via Web UI or CLI), the scheduler skips that tick.
-
-Known limitations (deferred to future iterations):
-- #1: PID-based mutex has race windows; needs shared atomic lock with TaskService
-- #2: Dedup commit and pending queue save are not atomic; crash between them
-      loses records; needs unified SQLite transaction or recovery log
-- #4: Large backlogs exceeding max_calls are retried whole; needs budget-based
-      batch splitting
-- #7: filter_unseen → ingest_raw TOCTOU under concurrent callers; needs
-      atomic claim mechanism
+用法：python -m content_screening.scheduler [--interval 900]
+每轮运行至多一个平台的采集。有手动任务运行时跳过该轮。
 """
 from __future__ import annotations
 
 import argparse
-from contextlib import closing
+from contextlib import ExitStack, closing
 from datetime import datetime, timezone
 import json
 import logging
-import os
 from pathlib import Path
 import socket
 import sys
 import time
 
 from .active_config import active_snapshot
-from .dedup import open_index, ingest_raw, filter_unseen, stats as dedup_stats
-from .platforms import PLATFORMS, selected
+from .content_queue import enqueue_from_raw, open_queue
+from .dedup import open_index, ingest_raw, stats as dedup_stats
+from .platforms import selected
 from .task_service import atomic_json, process_alive
 
 logger = logging.getLogger("scheduler")
 
 _DEFAULT_CONFIG = {
     "interval_seconds": 900,
-    "analysis_threshold": 50,
-    "analysis_interval_rounds": 6,
     "max_consecutive_failures": 3,
     "cooldown_rounds": 4,
     "batch_max_posts": 30,
     "batch_max_requests": 60,
 }
+_LEGACY_ANALYSIS_KEYS = {"pending_records", "pending_raw_files", "last_analysis_round"}
 
 
 def _utcnow():
@@ -104,19 +84,20 @@ class Scheduler:
         self.base = self.root / "data/scheduler"
         self.base.mkdir(parents=True, exist_ok=True)
         self.state_path = self.base / "state.json"
-        self.state = self._load_state()
-        self.dedup = open_index(self.root / "data/dedup.sqlite3")
+        with ExitStack() as cleanup:
+            self.dedup = cleanup.enter_context(closing(open_index(self.root / "data/dedup.sqlite3")))
+            self.queue = cleanup.enter_context(closing(open_queue(self.root / "data/content_queue.sqlite3")))
+            self.state = self._load_state()
+            if _LEGACY_ANALYSIS_KEYS & self.state.keys():
+                self._migrate_pending()
+            cleanup.pop_all()
 
-    _REQUIRED_KEYS = {"platforms", "round", "pending_records", "pending_raw_files",
-                       "last_analysis_round"}
+    _REQUIRED_KEYS = {"platforms", "round"}
 
     def _new_state(self):
         return {
             "platforms": {},
             "round": 0,
-            "pending_records": 0,
-            "pending_raw_files": [],
-            "last_analysis_round": 0,
             "created_at": _utcnow(),
         }
 
@@ -125,13 +106,33 @@ class Scheduler:
             try:
                 data = json.loads(self.state_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError) as e:
-                logger.warning("corrupt state file, starting fresh: %s", e)
+                logger.warning("读取调度状态失败，重新初始化：%s", e)
                 return self._new_state()
             if not isinstance(data, dict) or not self._REQUIRED_KEYS.issubset(data):
-                logger.warning("state file missing required keys, starting fresh")
+                logger.warning("调度状态缺少必要字段，重新初始化")
                 return self._new_state()
             return data
         return self._new_state()
+
+    def _migrate_pending(self):
+        """一次性导入旧版待分析文件，成功后移除旧分析字段。"""
+        runs = (self.base / "runs").resolve()
+        pending = self.state.get("pending_raw_files", [])
+        if not isinstance(pending, list):
+            logger.warning("旧版调度状态的待分析列表无效")
+            pending = []
+        for value in pending:
+            if not isinstance(value, str):
+                logger.warning("旧版调度状态包含无效的待分析文件路径")
+                continue
+            raw_path = Path(value).resolve()
+            if not raw_path.is_relative_to(runs) or not raw_path.is_file():
+                logger.warning("无法导入旧版待分析文件：%s", raw_path)
+                continue
+            enqueue_from_raw(self.queue, raw_path, raw_path.parent.name)
+        for key in _LEGACY_ANALYSIS_KEYS:
+            self.state.pop(key, None)
+        self._save()
 
     def _save(self):
         self.state["updated_at"] = _utcnow()
@@ -147,13 +148,11 @@ class Scheduler:
             "cooldown_until_round": 0,
         })
 
-    # ---- platform selection ------------------------------------------------
-
     def next_platform(self):
         try:
             snapshot = active_snapshot(self.root)
         except (OSError, ValueError) as e:
-            logger.warning("cannot read active config: %s", e)
+            logger.warning("无法读取当前配置：%s", e)
             return None
         settings = snapshot["bundle"]["collection"]
         platforms = selected(settings)
@@ -161,18 +160,16 @@ class Scheduler:
         for p in platforms:
             ps = self._ps(p)
             if ps["cooldown_until_round"] > self.state["round"]:
-                logger.debug("skip %s (cooldown until round %d)", p, ps["cooldown_until_round"])
+                logger.debug("跳过 %s，冷却至第 %d 轮", p, ps["cooldown_until_round"])
                 continue
             if not _check_browser(self.root, p):
-                logger.debug("skip %s (browser not ready)", p)
+                logger.debug("跳过 %s，浏览器尚未就绪", p)
                 continue
             candidates.append((p, ps))
         if not candidates:
             return None
         candidates.sort(key=lambda x: x[1]["last_run_at"] or "")
         return candidates[0][0]
-
-    # ---- collection --------------------------------------------------------
 
     def run_collection(self, platform):
         snapshot = active_snapshot(self.root)
@@ -189,11 +186,20 @@ class Scheduler:
         from .multi_collection import collect_selected
         result = collect_selected(settings, folder, self.root)
 
+        ok = result["status"] in ("completed", "completed_empty")
+        raw_path = Path(result["raw_file"]) if result.get("raw_file") else None
+        new_count = 0
+        if ok and raw_path and raw_path.is_file() and raw_path.stat().st_size > 0:
+            # 优先持久化队列，去重索引同步失败时原文仍可独立消费。
+            new_count = enqueue_from_raw(self.queue, raw_path, stamp)
+            ingest_raw(self.dedup, raw_path, stamp)
+            logger.info("%s 本轮新增入队 %d 条", platform, new_count)
+
         ps = self._ps(platform)
         ps["last_run_at"] = _utcnow()
         ps["total_runs"] += 1
+        ps["total_new_records"] += new_count
 
-        ok = result["status"] in ("completed", "completed_empty")
         if ok:
             ps["consecutive_failures"] = 0
             ps["last_success_at"] = ps["last_run_at"]
@@ -201,146 +207,53 @@ class Scheduler:
             ps["consecutive_failures"] += 1
             if ps["consecutive_failures"] >= self.config["max_consecutive_failures"]:
                 ps["cooldown_until_round"] = self.state["round"] + self.config["cooldown_rounds"]
-                logger.warning("%s entered cooldown after %d consecutive failures",
+                logger.warning("%s 连续失败 %d 次，进入冷却",
                                platform, ps["consecutive_failures"])
 
-        raw_path = result.get("raw_file")
-        new_count = 0
-        if ok and raw_path and Path(raw_path).exists() and Path(raw_path).stat().st_size > 0:
-            filtered = folder / "filtered.jsonl"
-            kept, skipped = filter_unseen(self.dedup, raw_path, filtered)
-            if kept:
-                new_count = ingest_raw(self.dedup, filtered, stamp)
-                ps["total_new_records"] += new_count
-                self.state["pending_records"] += new_count
-                self.state["pending_raw_files"].append(str(filtered))
-                logger.info("%s: %d new, %d duplicate skipped", platform, kept, skipped)
-            else:
-                logger.info("%s: all %d records already seen", platform, skipped)
-            ingest_raw(self.dedup, raw_path, stamp)
         self._save()
         return {"platform": platform, "status": result["status"],
                 "new_records": new_count, "total_records": result.get("records", 0)}
 
-    # ---- analysis ----------------------------------------------------------
-
-    def should_analyze(self):
-        if self.state["pending_records"] >= self.config["analysis_threshold"]:
-            return True
-        rounds_since = self.state["round"] - self.state["last_analysis_round"]
-        return self.state["pending_records"] > 0 and rounds_since >= self.config["analysis_interval_rounds"]
-
-    def run_analysis(self):
-        pending = self.state["pending_raw_files"]
-        if not pending:
-            return None
-
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        merged_dir = self.base / "analysis" / stamp
-        merged_dir.mkdir(parents=True, exist_ok=True)
-        merged_raw = merged_dir / "raw.jsonl"
-
-        missing = []
-        with merged_raw.open("w", encoding="utf-8") as out:
-            for raw_path in pending:
-                p = Path(raw_path)
-                if not p.exists() or p.stat().st_size == 0:
-                    missing.append(raw_path)
-                    continue
-                content = p.read_text(encoding="utf-8")
-                out.write(content)
-                if not content.endswith("\n"):
-                    out.write("\n")
-        if missing:
-            logger.warning("missing or empty pending files: %s", missing)
-
-        if merged_raw.stat().st_size == 0:
-            self.state["pending_raw_files"] = []
-            self.state["pending_records"] = 0
-            self._save()
-            return None
-
-        snapshot = active_snapshot(self.root)
-        policy_path = snapshot["policy_path"]
-        task = snapshot["bundle"].get("task")
-        if task:
-            mode = task["execution"].get("mode", "ark")
-            max_calls = task["execution"].get("max_api_calls", 500)
-        else:
-            mode = "ark"
-            max_calls = 500
-
-        from .workflow import run as workflow_run
-        from .db_access import resolve_db
-        result = workflow_run(
-            merged_raw, policy_path, resolve_db(),
-            self.root / "output/scheduler",
-            mode, self.root / "config/connection.json", max_calls,
-            task=task, config_revision=snapshot["revision"],
-        )
-
-        status = result.get("status", "")
-        if status in ("completed", ""):
-            self.state["pending_raw_files"] = []
-            self.state["pending_records"] = 0
-        else:
-            logger.warning("analysis returned status=%s, keeping pending queue for retry", status)
-
-        self.state["last_analysis_round"] = self.state["round"]
-        self._save()
-        logger.info("analysis done: status=%s, %d candidates, %d API calls",
-                     status, result.get("candidate_contents", 0), result.get("api_calls", 0))
-        return result
-
-    # ---- main loop ---------------------------------------------------------
-
     def tick(self):
         self.state["round"] += 1
-        logger.info("=== round %d ===", self.state["round"])
+        logger.info("开始第 %d 轮采集", self.state["round"])
 
         if _any_task_running(self.root):
-            logger.info("manual task running, skipping this round")
+            logger.info("手动任务正在运行，跳过本轮采集")
             self._save()
             return {"round": self.state["round"], "skipped": "manual_task_running"}
 
         platform = self.next_platform()
         collection = None
-        analysis = None
 
         if platform:
             try:
                 collection = self.run_collection(platform)
             except Exception:
-                logger.exception("collection failed for %s", platform)
+                logger.exception("%s 采集失败", platform)
                 ps = self._ps(platform)
                 ps["last_run_at"] = _utcnow()
                 ps["consecutive_failures"] += 1
                 if ps["consecutive_failures"] >= self.config["max_consecutive_failures"]:
                     ps["cooldown_until_round"] = self.state["round"] + self.config["cooldown_rounds"]
-                    logger.warning("%s entered cooldown after %d consecutive failures",
+                    logger.warning("%s 连续失败 %d 次，进入冷却",
                                    platform, ps["consecutive_failures"])
                 self._save()
         else:
-            logger.info("no platform available this round")
-
-        if self.should_analyze():
-            try:
-                analysis = self.run_analysis()
-            except Exception as e:
-                logger.error("analysis failed: %s", e)
+            logger.info("本轮无可用采集平台")
 
         self._save()
         return {"round": self.state["round"], "platform": platform,
-                "collection": collection, "analysis": analysis,
-                "pending": self.state["pending_records"],
-                "dedup": dedup_stats(self.dedup)}
+                "collection": collection, "dedup": dedup_stats(self.dedup)}
 
     def close(self):
         try:
-            self.dedup.close()
-        except Exception:
-            pass
-        self._save()
+            self.queue.close()
+        finally:
+            try:
+                self.dedup.close()
+            finally:
+                self._save()
 
     def run(self, interval=None):
         interval = interval or self.config["interval_seconds"]
@@ -348,33 +261,30 @@ class Scheduler:
         from .runtime_context import current_context, set_context
         set_context(current_context())
 
-        logger.info("scheduler starting (interval=%ds, analysis_threshold=%d)",
-                     interval, self.config["analysis_threshold"])
-        logger.info("dedup index: %s", dedup_stats(self.dedup))
+        logger.info("调度器启动，每 %d 秒采集一轮", interval)
+        logger.info("去重索引统计：%s", dedup_stats(self.dedup))
 
         try:
             while True:
                 try:
                     result = self.tick()
-                    logger.info("round %d done: pending=%d",
-                                result["round"], result.get("pending", self.state["pending_records"]))
+                    logger.info("第 %d 轮调度结束", result["round"])
                 except KeyboardInterrupt:
                     raise
                 except Exception:
-                    logger.exception("tick failed")
+                    logger.exception("调度轮次失败")
                 time.sleep(interval)
         except KeyboardInterrupt:
-            logger.info("scheduler stopped")
+            logger.info("调度器已停止")
         finally:
             self.close()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Persistent collection/analysis scheduler")
-    parser.add_argument("--interval", type=int, default=900, help="seconds between rounds (default 900)")
-    parser.add_argument("--analysis-threshold", type=int, default=50, help="new records before analysis (default 50)")
-    parser.add_argument("--batch-max-posts", type=int, default=30, help="max posts per collection batch")
-    parser.add_argument("--status", action="store_true", help="show current state and exit")
+    parser = argparse.ArgumentParser(description="轮转采集平台并写入内容队列")
+    parser.add_argument("--interval", type=int, default=900, help="调度间隔（秒，默认 900）")
+    parser.add_argument("--batch-max-posts", type=int, default=30, help="每轮最多采集的作品数")
+    parser.add_argument("--status", action="store_true", help="显示当前调度状态后退出")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -388,9 +298,12 @@ def main():
     if args.status:
         state_path = root / "data/scheduler/state.json"
         if not state_path.exists():
-            print("scheduler has never run")
+            print("调度器尚未运行")
             return 0
         state = json.loads(state_path.read_text(encoding="utf-8"))
+        if isinstance(state, dict):
+            for key in _LEGACY_ANALYSIS_KEYS:
+                state.pop(key, None)
         dedup_path = root / "data/dedup.sqlite3"
         ds = {}
         if dedup_path.exists():
@@ -401,7 +314,6 @@ def main():
 
     config = {
         "interval_seconds": args.interval,
-        "analysis_threshold": args.analysis_threshold,
         "batch_max_posts": args.batch_max_posts,
     }
     scheduler = Scheduler(root, config)
