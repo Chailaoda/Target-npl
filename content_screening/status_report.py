@@ -85,6 +85,19 @@ def system_status(root, context=None, budget_config=None):
         except Exception as e:
             result["feedback"] = {"error": str(e)}
 
+        # 发现仪表盘
+        try:
+            from .discovery_dashboard import dashboard
+            result["discovery_dashboard"] = dashboard(context, min_score=50)
+        except Exception as e:
+            result["discovery_dashboard"] = {"error": str(e)}
+
+        try:
+            from .social_signal import signal_summary
+            result["social_signals"] = signal_summary(context)
+        except Exception as e:
+            result["social_signals"] = {"error": str(e)}
+
     # 数据库分析统计
     if context:
         try:

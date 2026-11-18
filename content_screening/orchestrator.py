@@ -41,6 +41,7 @@ _DEFAULT_CONFIG = {
     "enable_similarity_finder": False,
     "similarity_min_score": 30,
     "enable_weight_adaptation": False,
+    "enable_social_signals": False,
 }
 
 
@@ -189,6 +190,15 @@ class Orchestrator:
             except Exception:
                 logger.warning("权重自适应失败", exc_info=True)
 
+        if self.config.get("enable_social_signals"):
+            try:
+                from .social_signal import enhance_priorities as social_enhance
+                enhanced = social_enhance(context)
+                if enhanced:
+                    logger.info("社交信号增强：更新 %d 个候选的优先级", enhanced)
+            except Exception:
+                logger.warning("社交信号计算失败", exc_info=True)
+
         self.scheduler._save()
         result = {
             "round": round_num,
@@ -323,6 +333,8 @@ def main():
                         help="启用内容相似发现")
     parser.add_argument("--enable-weight-adaptation", action="store_true",
                         help="启用发现策略权重自适应")
+    parser.add_argument("--enable-social-signals", action="store_true",
+                        help="启用社交辅助信号优先级增强")
     parser.add_argument("--status", action="store_true",
                         help="显示系统运行状态后退出")
     args = parser.parse_args()
@@ -358,6 +370,7 @@ def main():
         "enable_graph_explorer": args.enable_graph_explorer,
         "enable_similarity_finder": args.enable_similarity_finder,
         "enable_weight_adaptation": args.enable_weight_adaptation,
+        "enable_social_signals": args.enable_social_signals,
     }
     orchestrator = Orchestrator(root, config)
     orchestrator.run(args.interval)
