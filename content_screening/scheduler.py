@@ -148,12 +148,13 @@ class Scheduler:
             "cooldown_until_round": 0,
         })
 
-    def next_platform(self):
-        try:
-            snapshot = active_snapshot(self.root)
-        except (OSError, ValueError) as e:
-            logger.warning("无法读取当前配置：%s", e)
-            return None
+    def available_platforms(self, snapshot=None):
+        if snapshot is None:
+            try:
+                snapshot = active_snapshot(self.root)
+            except (OSError, ValueError) as e:
+                logger.warning("无法读取当前配置：%s", e)
+                return []
         settings = snapshot["bundle"]["collection"]
         platforms = selected(settings)
         candidates = []
@@ -166,6 +167,10 @@ class Scheduler:
                 logger.debug("跳过 %s，浏览器尚未就绪", p)
                 continue
             candidates.append((p, ps))
+        return candidates
+
+    def next_platform(self):
+        candidates = self.available_platforms()
         if not candidates:
             return None
         candidates.sort(key=lambda x: x[1]["last_run_at"] or "")
