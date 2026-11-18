@@ -34,6 +34,8 @@ _DEFAULT_CONFIG = {
     "analyzer_restart_delay": 30,
     "daily_api_calls": 2000,
     "daily_collection_posts": 500,
+    "enable_thread_mining": False,
+    "thread_mining_min_score": 30,
 }
 
 
@@ -140,13 +142,26 @@ class Orchestrator:
         self.budget.record_tick(
             [(platform, info["new_records"]) for platform, info in summary.items()])
 
+        mining_result = None
+        if self.config.get("enable_thread_mining"):
+            try:
+                from .thread_miner import mine_and_register
+                mining_result, posts_scanned, commenters = mine_and_register(
+                    current_context(),
+                    min_score=self.config.get("thread_mining_min_score", 30))
+            except Exception:
+                logger.warning("深度评论挖掘失败", exc_info=True)
+
         self.scheduler._save()
-        return {
+        result = {
             "round": round_num,
             "collections": summary,
             "dedup": dedup_stats(self.scheduler.dedup),
             "budget": self.budget.status(),
         }
+        if mining_result:
+            result["thread_mining"] = mining_result
+        return result
 
     def _process_result(self, platform, result, stamp):
         """在主线程中处理采集结果：入队、去重、更新平台状态。"""
@@ -259,6 +274,8 @@ def main():
                         help="每日 API 调用预算（默认 2000）")
     parser.add_argument("--daily-collection-posts", type=int, default=500,
                         help="每日采集内容预算（默认 500）")
+    parser.add_argument("--enable-thread-mining", action="store_true",
+                        help="启用深度评论区挖掘")
     parser.add_argument("--status", action="store_true",
                         help="显示系统运行状态后退出")
     args = parser.parse_args()
@@ -290,6 +307,7 @@ def main():
         "enable_analyzer": not args.no_analyzer,
         "daily_api_calls": args.daily_api_calls,
         "daily_collection_posts": args.daily_collection_posts,
+        "enable_thread_mining": args.enable_thread_mining,
     }
     orchestrator = Orchestrator(root, config)
     orchestrator.run(args.interval)

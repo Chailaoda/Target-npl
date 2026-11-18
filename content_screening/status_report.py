@@ -66,6 +66,18 @@ def system_status(root, context=None, budget_config=None):
     except Exception as e:
         result["budget"] = {"error": str(e)}
 
+    # 候选账号池
+    if context:
+        try:
+            from .candidate_pool import CandidatePool
+            pool = CandidatePool(context)
+            try:
+                result["candidates"] = pool.stats()
+            finally:
+                pool.close()
+        except Exception as e:
+            result["candidates"] = {"error": str(e)}
+
     # 数据库分析统计
     if context:
         try:
