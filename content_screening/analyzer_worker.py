@@ -36,6 +36,13 @@ class AnalyzerWorker:
             raise ValueError("分析进程标识必须为非空字符串")
         self.worker_id = uuid.uuid4().hex if worker_id == "auto" else worker_id
         self.queue = open_queue(self.root / "data/content_queue.sqlite3")
+        daily_limit = self.config.get("daily_api_calls")
+        if daily_limit is not None:
+            from .budget_controller import BudgetController
+            self.budget = BudgetController(self.root, {
+                "daily_api_calls": daily_limit})
+        else:
+            self.budget = None
 
     def _write_raw(self, records):
         base = self.root / "data/scheduler/analysis"
@@ -57,6 +64,8 @@ class AnalyzerWorker:
     def process_batch(self):
         """处理一个队列批次，提交每条记录的最终状态。"""
         unclaim_stale(self.queue)
+        if self.budget and self.budget.available_api_calls() <= 0:
+            return {"claimed": 0, "budget_exhausted": True}
         if self.queue.execute("SELECT 1 FROM queue WHERE status='pending' LIMIT 1").fetchone() is None:
             return {"claimed": 0}
 
@@ -65,6 +74,8 @@ class AnalyzerWorker:
         execution = task.get("execution", {}) if task else {}
         mode = execution.get("mode", "ark")
         max_calls = min(self.config["max_calls"], execution.get("max_api_calls", 500))
+        if self.budget:
+            max_calls = min(max_calls, self.budget.available_api_calls())
         limit = self.config["batch_size"]
         if mode == "ark":
             # 每条原文最多触发一次调用，额度外的记录继续排队。
@@ -136,6 +147,8 @@ class AnalyzerWorker:
             done = []
 
         finish(self.queue, done, failures)
+        if self.budget and api_calls > 0:
+            self.budget.record_api_calls(api_calls)
         if done and result.get("job_id"):
             try:
                 from .profile_refresh import refresh_for_job

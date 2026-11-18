@@ -14,8 +14,9 @@ from .task_contract import default_task,validate_task,validate_execution,changed
 
 
 def atomic_json(path,obj):
+    import uuid as _uuid
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
-    temp=path.with_suffix('.tmp');temp.write_text(json.dumps(obj,ensure_ascii=False,indent=2),encoding='utf-8');temp.replace(path)
+    temp=path.with_suffix(f'.{_uuid.uuid4().hex[:8]}.tmp');temp.write_text(json.dumps(obj,ensure_ascii=False,indent=2),encoding='utf-8');temp.replace(path)
 
 
 def process_alive(pid):

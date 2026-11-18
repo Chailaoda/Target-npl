@@ -32,6 +32,8 @@ _DEFAULT_CONFIG = {
     "analyzer_max_calls": 500,
     "analyzer_interval": 60,
     "analyzer_restart_delay": 30,
+    "daily_api_calls": 2000,
+    "daily_collection_posts": 500,
 }
 
 
@@ -48,6 +50,12 @@ class Orchestrator:
         self.root = Path(root).resolve()
         self.config = {**_DEFAULT_CONFIG, **(config or {})}
         self._last_config_revision = None
+        from .budget_controller import BudgetController
+        self.budget = BudgetController(self.root, {
+            k: self.config[k]
+            for k in ("daily_api_calls", "daily_collection_posts")
+            if k in self.config
+        })
         self.scheduler = Scheduler(root, {
             k: self.config[k]
             for k in ("interval_seconds", "batch_max_posts", "batch_max_requests")
@@ -71,6 +79,11 @@ class Orchestrator:
             logger.info("检测到配置变更：%s → %s",
                         self._last_config_revision[:8], revision[:8])
         self._last_config_revision = revision
+
+        if self.budget.available_collection_posts() <= 0:
+            logger.info("今日采集预算已耗尽，跳过本轮")
+            self.scheduler._save()
+            return {"round": round_num, "skipped": "budget_exhausted"}
 
         candidates = self.scheduler.available_platforms(snapshot=snapshot)
         if not candidates:
@@ -124,11 +137,15 @@ class Orchestrator:
             info = self._process_result(platform, result, stamp)
             summary[platform] = info
 
+        self.budget.record_tick(
+            [(platform, info["new_records"]) for platform, info in summary.items()])
+
         self.scheduler._save()
         return {
             "round": round_num,
             "collections": summary,
             "dedup": dedup_stats(self.scheduler.dedup),
+            "budget": self.budget.status(),
         }
 
     def _process_result(self, platform, result, stamp):
@@ -214,6 +231,7 @@ class Orchestrator:
                     "batch_size": self.config.get("analyzer_batch_size", 30),
                     "max_calls": self.config.get("analyzer_max_calls", 500),
                     "interval": self.config.get("analyzer_interval", 60),
+                    "daily_api_calls": self.config.get("daily_api_calls"),
                 })
                 worker.run()
                 break
@@ -237,8 +255,12 @@ def main():
                         help="每平台每轮最多采集作品数")
     parser.add_argument("--no-analyzer", action="store_true",
                         help="不启动后台分析进程")
+    parser.add_argument("--daily-api-calls", type=int, default=2000,
+                        help="每日 API 调用预算（默认 2000）")
+    parser.add_argument("--daily-collection-posts", type=int, default=500,
+                        help="每日采集内容预算（默认 500）")
     parser.add_argument("--status", action="store_true",
-                        help="显示编排器状态后退出")
+                        help="显示系统运行状态后退出")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -252,20 +274,12 @@ def main():
     root = Path(ctx.state_root)
 
     if args.status:
-        state_path = root / "data/scheduler/state.json"
-        output = {}
-        if state_path.exists():
-            output["state"] = json.loads(state_path.read_text(encoding="utf-8"))
-        else:
-            output["state"] = "调度器尚未运行"
-        dedup_path = root / "data/dedup.sqlite3"
-        if dedup_path.exists():
-            with closing(open_index(dedup_path)) as db:
-                output["dedup"] = dedup_stats(db)
-        queue_path = root / "data/content_queue.sqlite3"
-        if queue_path.exists():
-            with closing(open_queue(queue_path)) as db:
-                output["queue"] = queue_stats(db)
+        from .status_report import system_status
+        budget_config = {
+            "daily_api_calls": args.daily_api_calls,
+            "daily_collection_posts": args.daily_collection_posts,
+        }
+        output = system_status(root, context=ctx, budget_config=budget_config)
         print(json.dumps(output, ensure_ascii=False, indent=2))
         return 0
 
@@ -274,6 +288,8 @@ def main():
         "max_collectors": args.max_collectors,
         "batch_max_posts": args.batch_max_posts,
         "enable_analyzer": not args.no_analyzer,
+        "daily_api_calls": args.daily_api_calls,
+        "daily_collection_posts": args.daily_collection_posts,
     }
     orchestrator = Orchestrator(root, config)
     orchestrator.run(args.interval)
