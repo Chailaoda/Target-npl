@@ -78,6 +78,7 @@ class AnalyzerWorker:
         hashes = {}
         done = []
         api_calls = 0
+        result = {}
         try:
             for item in items:
                 item_id = item["id"]
@@ -135,6 +136,14 @@ class AnalyzerWorker:
             done = []
 
         finish(self.queue, done, failures)
+        if done and result.get("job_id"):
+            try:
+                from .profile_refresh import refresh_for_job
+                from .runtime_context import current_context
+                refreshed, topics = refresh_for_job(
+                    current_context(), result["job_id"])
+            except Exception:
+                logger.warning("画像增量刷新失败", exc_info=True)
         return {"claimed": len(items), "done": len(done), "failed": len(failures), "api_calls": api_calls}
 
     def run(self, interval=None):

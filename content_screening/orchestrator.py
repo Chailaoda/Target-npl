@@ -47,6 +47,7 @@ class Orchestrator:
     def __init__(self, root, config=None):
         self.root = Path(root).resolve()
         self.config = {**_DEFAULT_CONFIG, **(config or {})}
+        self._last_config_revision = None
         self.scheduler = Scheduler(root, {
             k: self.config[k]
             for k in ("interval_seconds", "batch_max_posts", "batch_max_requests")
@@ -65,6 +66,12 @@ class Orchestrator:
             return {"round": round_num, "skipped": "manual_task_running"}
 
         snapshot = active_snapshot(self.root)
+        revision = snapshot["revision"]
+        if self._last_config_revision and revision != self._last_config_revision:
+            logger.info("检测到配置变更：%s → %s",
+                        self._last_config_revision[:8], revision[:8])
+        self._last_config_revision = revision
+
         candidates = self.scheduler.available_platforms(snapshot=snapshot)
         if not candidates:
             logger.info("本轮无可用采集平台")
