@@ -78,6 +78,13 @@ def system_status(root, context=None, budget_config=None):
         except Exception as e:
             result["candidates"] = {"error": str(e)}
 
+        # 反馈统计独立于候选池报告。
+        try:
+            from .feedback_loop import feedback_stats
+            result["feedback"] = feedback_stats(context)
+        except Exception as e:
+            result["feedback"] = {"error": str(e)}
+
     # 数据库分析统计
     if context:
         try:

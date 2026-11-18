@@ -36,6 +36,8 @@ _DEFAULT_CONFIG = {
     "daily_collection_posts": 500,
     "enable_thread_mining": False,
     "thread_mining_min_score": 30,
+    "enable_graph_explorer": False,
+    "graph_explorer_min_score": 50,
 }
 
 
@@ -152,6 +154,20 @@ class Orchestrator:
             except Exception:
                 logger.warning("深度评论挖掘失败", exc_info=True)
 
+        graph_result = None
+        if self.config.get("enable_graph_explorer"):
+            try:
+                from .feedback_loop import confirmed_seed_accounts
+                from .graph_explorer import explore_and_register
+
+                min_score = self.config.get("graph_explorer_min_score", 50)
+                graph_result, _, _ = explore_and_register(
+                    context, min_score=min_score,
+                    extra_seed_account_keys=confirmed_seed_accounts(context, min_score),
+                )
+            except Exception:
+                logger.warning("社交图谱探索失败", exc_info=True)
+
         self.scheduler._save()
         result = {
             "round": round_num,
@@ -161,6 +177,8 @@ class Orchestrator:
         }
         if mining_result:
             result["thread_mining"] = mining_result
+        if graph_result:
+            result["graph_explorer"] = graph_result
         return result
 
     def _process_result(self, platform, result, stamp):
@@ -276,6 +294,8 @@ def main():
                         help="每日采集内容预算（默认 500）")
     parser.add_argument("--enable-thread-mining", action="store_true",
                         help="启用深度评论区挖掘")
+    parser.add_argument("--enable-graph-explorer", action="store_true",
+                        help="启用社交图谱探索")
     parser.add_argument("--status", action="store_true",
                         help="显示系统运行状态后退出")
     args = parser.parse_args()
@@ -308,6 +328,7 @@ def main():
         "daily_api_calls": args.daily_api_calls,
         "daily_collection_posts": args.daily_collection_posts,
         "enable_thread_mining": args.enable_thread_mining,
+        "enable_graph_explorer": args.enable_graph_explorer,
     }
     orchestrator = Orchestrator(root, config)
     orchestrator.run(args.interval)
