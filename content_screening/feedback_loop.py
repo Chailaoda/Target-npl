@@ -94,3 +94,29 @@ def feedback_stats(context):
         "multipliers": _multipliers(effectiveness),
         "confirmed_seeds": len(confirmed_seed_accounts(context)),
     }
+
+
+def adjust_priorities(context):
+    """根据发现路径乘数更新新候选的优先级，返回实际变更的记录数。"""
+    multipliers = confidence_multipliers(context)
+    pool = CandidatePool(context)
+    try:
+        with pool.db:
+            pool.db.execute("BEGIN IMMEDIATE")
+            updates = []
+            for row in pool.db.execute("""
+                SELECT id, discovery_path, merged_confidence, priority
+                FROM discovery_candidates
+                WHERE status = 'new'
+            """):
+                multiplier = multipliers.get(row["discovery_path"], 1.0)
+                priority = round(row["merged_confidence"] * multiplier * 100)
+                if priority != row["priority"]:
+                    updates.append((priority, row["id"]))
+            pool.db.executemany("""
+                UPDATE discovery_candidates SET priority = ?
+                WHERE id = ? AND status = 'new'
+            """, updates)
+            return len(updates)
+    finally:
+        pool.close()

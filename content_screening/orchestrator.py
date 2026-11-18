@@ -38,6 +38,9 @@ _DEFAULT_CONFIG = {
     "thread_mining_min_score": 30,
     "enable_graph_explorer": False,
     "graph_explorer_min_score": 50,
+    "enable_similarity_finder": False,
+    "similarity_min_score": 30,
+    "enable_weight_adaptation": False,
 }
 
 
@@ -168,6 +171,24 @@ class Orchestrator:
             except Exception:
                 logger.warning("社交图谱探索失败", exc_info=True)
 
+        similarity_result = None
+        if self.config.get("enable_similarity_finder"):
+            try:
+                from .similarity_finder import find_and_register
+                similarity_result, _, _ = find_and_register(
+                    context, min_score=self.config.get("similarity_min_score", 30))
+            except Exception:
+                logger.warning("内容相似发现失败", exc_info=True)
+
+        if self.config.get("enable_weight_adaptation"):
+            try:
+                from .feedback_loop import adjust_priorities
+                adjusted = adjust_priorities(context)
+                if adjusted:
+                    logger.info("权重自适应：更新 %d 个候选的优先级", adjusted)
+            except Exception:
+                logger.warning("权重自适应失败", exc_info=True)
+
         self.scheduler._save()
         result = {
             "round": round_num,
@@ -179,6 +200,8 @@ class Orchestrator:
             result["thread_mining"] = mining_result
         if graph_result:
             result["graph_explorer"] = graph_result
+        if similarity_result:
+            result["similarity_finder"] = similarity_result
         return result
 
     def _process_result(self, platform, result, stamp):
@@ -296,6 +319,10 @@ def main():
                         help="启用深度评论区挖掘")
     parser.add_argument("--enable-graph-explorer", action="store_true",
                         help="启用社交图谱探索")
+    parser.add_argument("--enable-similarity-finder", action="store_true",
+                        help="启用内容相似发现")
+    parser.add_argument("--enable-weight-adaptation", action="store_true",
+                        help="启用发现策略权重自适应")
     parser.add_argument("--status", action="store_true",
                         help="显示系统运行状态后退出")
     args = parser.parse_args()
@@ -329,6 +356,8 @@ def main():
         "daily_collection_posts": args.daily_collection_posts,
         "enable_thread_mining": args.enable_thread_mining,
         "enable_graph_explorer": args.enable_graph_explorer,
+        "enable_similarity_finder": args.enable_similarity_finder,
+        "enable_weight_adaptation": args.enable_weight_adaptation,
     }
     orchestrator = Orchestrator(root, config)
     orchestrator.run(args.interval)
