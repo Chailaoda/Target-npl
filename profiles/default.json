@@ -1,0 +1,109 @@
+{
+  "schema_version": 2,
+  "id": "sample",
+  "name": "示例主题（请在本机修改）",
+  "topic_patterns": [
+    "示例活动"
+  ],
+  "dimensions": {
+    "topic": [
+      "relevant",
+      "unrelated",
+      "uncertain"
+    ],
+    "stance": [
+      "positive",
+      "negative",
+      "neutral",
+      "unclear"
+    ],
+    "intent": [
+      "seeking_company",
+      "planning",
+      "attended",
+      "none",
+      "unclear"
+    ],
+    "promotion": [
+      "yes",
+      "no",
+      "uncertain"
+    ],
+    "author_role": [
+      "individual",
+      "organizer",
+      "unknown"
+    ]
+  },
+  "acceptance": {
+    "stances": [
+      "positive"
+    ],
+    "intents": [
+      "seeking_company",
+      "planning",
+      "attended"
+    ]
+  },
+  "decision_gates": {
+    "stance_positive": [
+      "我喜欢|我也喜欢|喜欢这个|想去|真棒"
+    ],
+    "intent_seeking_company": [
+      "找搭子|求搭子|约搭子|有结伴的吗|求组队|组队吗|一起组队|求拉群|求一起|求同行|找同行|一起去|一起打|一起冲"
+    ],
+    "intent_planning": [
+      "打算去|准备去|我也想去|买了票"
+    ],
+    "intent_attended": [
+      "参加了|去过|体验过"
+    ],
+    "promotion_yes": [
+      "低价出票|票务代理|代抢|加微|私信我"
+    ],
+    "author_role_organizer": [
+      "主办方|组织方"
+    ],
+    "author_role_individual": [
+      "我|本人"
+    ],
+    "cancelled_plan": [
+      "算了不去|退票去不了"
+    ]
+  },
+  "ambiguous_reply_patterns": [
+    "^我也是$"
+  ],
+  "rules": {
+    "stance_negative": [
+      "不喜欢|没兴趣|避雷|骗子"
+    ],
+    "stance_positive": [
+      "我喜欢|我也喜欢|喜欢这个|想去|真棒"
+    ],
+    "intent_seeking_company": [
+      "找搭子|求搭子|约搭子|有结伴的吗|求组队|组队吗|一起组队|求拉群|求一起|求同行|找同行|一起去|一起打|一起冲"
+    ],
+    "intent_planning": [
+      "打算去|准备去|我也想去|买了票"
+    ],
+    "intent_attended": [
+      "参加了|去过|体验过"
+    ],
+    "promotion_yes": [
+      "低价出票|票务代理|代抢|加微|私信我"
+    ],
+    "author_role_organizer": [
+      "主办方|组织方"
+    ]
+  },
+  "display": {
+    "sort_weights": {
+      "seeking_company": 90,
+      "planning": 80,
+      "attended": 70,
+      "positive": 60
+    },
+    "include_related": true
+  }
+}

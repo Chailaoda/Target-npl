@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "music_festival",
+  "name": "音乐节公开兴趣线索",
+  "topic_patterns": ["音乐节", "music\\s+festival"],
+  "accepted_labels": ["seeking_company", "planning", "positive_interest"],
+  "rules": [
+    {"label": "promotion", "name": "售票或推广线索", "score": 0, "patterns": ["代抢", "加微", "加V", "票务代理", "售票", "低价出票", "返佣"]},
+    {"label": "negative", "name": "明确不感兴趣或不参加", "score": 0, "patterns": ["(?:不喜欢|不爱|讨厌).{0,8}(?:音乐节|music\\s+festival)", "(?:音乐节|music\\s+festival).{0,8}(?:不去了|不想去|不感兴趣)", "(?:不去|不参加).{0,8}(?:音乐节|music\\s+festival)"]},
+    {"label": "seeking_company", "name": "寻找音乐节同行", "score": 90, "patterns": ["找.{0,6}(?:搭子|同行)", "求.{0,6}(?:搭子|同行)", "(?:一起去|有人一起|约伴)"]},
+    {"label": "planning", "name": "明确表达参加计划", "score": 80, "patterns": ["(?:准备|打算|计划|想去|要去|会去|已买票|买好票)"]},
+    {"label": "positive_interest", "name": "明确表达喜欢", "score": 70, "patterns": ["(?:我|本人).{0,6}(?:喜欢|爱).{0,8}(?:音乐节|music\\s+festival)", "(?:音乐节|music\\s+festival).{0,8}(?:我喜欢|我最爱)"]}
+  ]
+}

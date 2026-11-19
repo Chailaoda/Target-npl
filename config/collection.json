@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "platform": "douyin",
+  "keywords": ["搭子", "找搭子"],
+  "pages_per_keyword": 3,
+  "posts_per_keyword": 20,
+  "max_posts": 60,
+  "comments_per_post": 20,
+  "request_interval_seconds": 2,
+  "max_requests": 120,
+  "timeout_seconds": 300,
+  "proxy_mode": "direct"
+}

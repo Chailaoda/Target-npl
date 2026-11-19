@@ -14,8 +14,9 @@ from .task_contract import default_task,validate_task,validate_execution,changed
 
 
 def atomic_json(path,obj):
+    import uuid as _uuid
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
-    temp=path.with_suffix('.tmp');temp.write_text(json.dumps(obj,ensure_ascii=False,indent=2),encoding='utf-8');temp.replace(path)
+    temp=path.with_suffix(f'.{_uuid.uuid4().hex[:8]}.tmp');temp.write_text(json.dumps(obj,ensure_ascii=False,indent=2),encoding='utf-8');temp.replace(path)
 
 
 def process_alive(pid):
@@ -40,7 +41,10 @@ class TaskService:
     def __init__(self,store=None):
         from .control_server import RuleStore
         self.store=store or RuleStore();self.root=self.store.root
-        self.runs=self.root/'data/task-runs';self.runs.mkdir(parents=True,exist_ok=True)
+        self.runs=self.root/'data/task-runs'
+        from .runtime_context import current_context
+        if current_context().deployment.get("test_isolated"):
+            self.runs.mkdir(parents=True,exist_ok=True)
 
     def get(self):
         state=self.store.state();state=copy.deepcopy(state)
@@ -274,7 +278,10 @@ class TaskService:
             if spawn:
                 import os
                 with (folder/'worker.log').open('ab') as log:
-                    child=subprocess.Popen([sys.executable,'-X','utf8','-m','content_screening.task_worker','--run-id',run_id],cwd=self.root,stdout=log,stderr=log,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+                    from .runtime_context import current_context
+                    context=current_context()
+                    child_env=dict(os.environ,TARGET_NPL_DEPLOYMENT=str(context.deployment_path),PYTHONDONTWRITEBYTECODE='1')
+                    child=subprocess.Popen([sys.executable,'-X','utf8','-m','content_screening.task_worker','--run-id',run_id],cwd=context.app_root,env=child_env,stdout=log,stderr=log,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
                 atomic_json(folder/'launch.json',{'pid':child.pid})
             return state
 
@@ -284,7 +291,13 @@ class TaskService:
         state=json.loads((folder/'status.json').read_text(encoding='utf-8'))
         if state['status'] in ('queued','running'):
             launch=folder/'launch.json';pid=state.get('pid') or (json.loads(launch.read_text(encoding='utf-8')).get('pid') if launch.exists() else None)
-            if pid and not process_alive(pid):state=dict(state,status='interrupted',message='工作进程已退出；未自动重试，成功分析仍可由缓存复用')
+            if pid is None:
+                # A queued record can be left behind when spawning the worker
+                # fails before launch.json is written. It is not a running task.
+                state=dict(state,status='interrupted',phase='launch_failed',
+                           message='工作进程未成功启动，没有开始采集或模型分析；请回到任务配置重新开始。')
+            elif not process_alive(pid):
+                state=dict(state,status='interrupted',message='工作进程已退出；未自动重试，成功分析仍可由缓存复用')
         return state
 
     def results(self,run_id,offset=0,limit=20):

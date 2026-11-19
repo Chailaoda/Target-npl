@@ -1,0 +1,74 @@
+{
+  "record_type": "read_only_environment_assessment",
+  "session_date": "2026-10-28",
+  "date_timezone": "America/New_York",
+  "workspace": "E:\\workplace\\Target-npl",
+  "workspace_initial_state": "empty_directory",
+  "implementation_started": false,
+  "source_pdf": {
+    "path": "C:\\Users\\38265\\OneDrive\\Desktop\\社交媒体兴趣匹配工具技术路径.pdf",
+    "pages": 12,
+    "size_bytes": 3054762,
+    "sha256": "D44C68BD46A9A422DA7578EA3A6991FB5497B444B14480CCC85A9CB28DF52B0B"
+  },
+  "hardware": {
+    "source": "read-only Get-CimInstance and nvidia-smi queries",
+    "system_model": "ROG Zephyrus M16 GU603ZM_GU603ZM",
+    "os": "Microsoft Windows 11 家庭版 中文版",
+    "os_version": "10.0.26300",
+    "architecture": "64-bit",
+    "cpu": "12th Gen Intel(R) Core(TM) i7-12700H",
+    "cpu_cores": 14,
+    "cpu_logical_processors": 20,
+    "ram_total_gib_rounded": 39.7,
+    "ram_free_gib_at_observation_rounded": 14.76,
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+    "gpu_memory_source": "nvidia-smi",
+    "gpu_memory_total_mib": 6144,
+    "gpu_memory_free_mib_at_observation": 5996,
+    "disks": [
+      {"drive": "C:", "size_gib_rounded": 252.6, "free_gib_at_observation_rounded": 16.3},
+      {"drive": "D:", "size_gib_rounded": 510.9, "free_gib_at_observation_rounded": 158.1},
+      {"drive": "E:", "size_gib_rounded": 443.0, "free_gib_at_observation_rounded": 69.6},
+      {"drive": "F:", "size_gib_rounded": 200.0, "free_gib_at_observation_rounded": 42.5}
+    ],
+    "notes": [
+      "Free RAM, disk space and GPU free memory are transient readings, not reserved capacity.",
+      "CIM GPU AdapterRAM reported a different value; direct nvidia-smi total is used for GPU sizing.",
+      "No workload, thermal, sustained-performance or storage-health benchmark was run."
+    ]
+  },
+  "tools_verified": {
+    "bundled_python": "3.12.14",
+    "bundled_python_executable": "C:\\Users\\38265\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe",
+    "sqlite_in_bundled_python": "3.53.1",
+    "node": "v25.3.0",
+    "git": "2.53.0.windows.1",
+    "uv": "0.12.0",
+    "docker_client": "29.8.0",
+    "docker_server": "not_checked",
+    "wsl": "restricted_query_returned_Wsl/E_ACCESSDENIED; host_availability_not_established"
+  },
+  "packages_in_inspected_bundled_python": {
+    "pydantic": true,
+    "yaml": false,
+    "httpx": false,
+    "jinja2": false,
+    "pytest": false,
+    "playwright": false,
+    "rapidocr": false,
+    "onnxruntime": false
+  },
+  "not_verified": [
+    "project-specific virtual environment and dependency compatibility",
+    "platform API access and authorized data availability",
+    "model service credentials, balance and end-to-end connectivity",
+    "browser version and isolated project browser profile",
+    "real project throughput and OCR quality",
+    "unattended scheduling and multi-day stability"
+  ],
+  "changes_made_this_turn": [
+    "PDF text extraction and page rendering under workspace tmp/pdfs",
+    "review plan and environment assessment under workspace docs"
+  ]
+}

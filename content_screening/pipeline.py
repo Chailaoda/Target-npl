@@ -101,33 +101,10 @@ def classify(record, profile):
     return result
 
 
-def connect(path):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path)
-    db.executescript("""
-        PRAGMA foreign_keys=ON;
-        CREATE TABLE IF NOT EXISTS sources (
-            source_hash TEXT PRIMARY KEY, platform TEXT NOT NULL,
-            content_id TEXT NOT NULL, object_type TEXT NOT NULL, raw_json TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS profiles (
-            profile_hash TEXT PRIMARY KEY, profile_json TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS evaluations (
-            source_hash TEXT REFERENCES sources(source_hash),
-            profile_hash TEXT REFERENCES profiles(profile_hash),
-            result_json TEXT NOT NULL,
-            PRIMARY KEY(source_hash, profile_hash)
-        );
-        CREATE TABLE IF NOT EXISTS runs (
-            run_id INTEGER PRIMARY KEY, created_at TEXT NOT NULL,
-            profile_hash TEXT REFERENCES profiles(profile_hash),
-            input_count INTEGER NOT NULL, unique_count INTEGER NOT NULL,
-            accepted_count INTEGER NOT NULL
-        );
-    """)
-    return db
+def connect(path=None, *, readonly=False):
+    """Compatibility shim: legacy tables are created by explicit migration."""
+    from .db_access import connect as resolve_connect
+    return resolve_connect(path, readonly=readonly)
 
 
 def safe_url(url):
@@ -198,7 +175,7 @@ def main():
     command = sub.add_parser("run", help="导入并输出带原文证据的报告")
     command.add_argument("--input", required=True)
     command.add_argument("--profile", default="profiles/legacy.json")
-    command.add_argument("--db", default="data/screening.sqlite3")
+    command.add_argument("--db", default=None)
     command.add_argument("--output", default="output")
     command.add_argument("--model-mode", choices=["rules", "ark"], default="rules")
     command.add_argument("--connection", default="config/connection.json")
@@ -215,6 +192,9 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == "configure-ark":
+            from .runtime_context import current_context
+            context=current_context()
+            args.connection=str(context.state_path('config/connection.json'))
             import getpass
             from .connectors import load_connection
             from .credentials import save_key
@@ -232,6 +212,13 @@ def main():
             from .connectors import fetch_public_video
             result = fetch_public_video(args.url, args.output, "douyin" if args.command == "fetch-douyin" else "huoshan")
         else:
+            from .runtime_context import current_context,set_context
+            context=current_context();set_context(context)
+            from .db_access import resolve_db
+            args.db=args.db or str(resolve_db(context))
+            args.output=str(context.state_path(args.output))
+            args.profile=str(context.state_path(args.profile)) if args.profile=='profiles/default.json' else args.profile
+            args.connection=str(context.state_path(args.connection))
             evaluator = identity = None
             if args.model_mode == "ark":
                 from .connectors import ark_evaluator, load_connection
