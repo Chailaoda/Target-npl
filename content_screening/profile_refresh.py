@@ -9,9 +9,8 @@ import json
 import logging
 
 from .db_access import connect
-from .interest_service import (
-    InterestService, _candidate_rows, _raw_evidence, analyze_text,
-)
+from .interests import repository as repo
+from .interests.scoring import analyze_text, raw_evidence
 from .pipeline import fingerprint
 
 logger = logging.getLogger("profile_refresh")
@@ -50,11 +49,11 @@ def _affected_accounts(db, job_id):
     """, (job_id,)).fetchall()]
 
 
-def _refresh_one(db, service, account_key, definition, now):
+def _refresh_one(db, account_key, definition, now):
     """为单个账号刷新单个主题的画像（使用分析缓存，不修改主题状态）。"""
     cache_key = definition["profile_version"]
     observed_at = now.isoformat()
-    rows = _candidate_rows(db, account_key, definition)
+    rows = repo.candidate_rows(db, account_key, definition)
     current = []
     for link, record in rows:
         source_hash = link["source_hash"]
@@ -79,7 +78,7 @@ def _refresh_one(db, service, account_key, definition, now):
                     analyzed = analyze_text(record, definition)
                     if analyzed["decision"] == "accepted":
                         current.append(
-                            _raw_evidence(link, record, analyzed, definition))
+                            raw_evidence(link, record, analyzed, definition))
             continue
         analyzed = analyze_text(record, definition)
         analysis_key = fingerprint(
@@ -94,14 +93,13 @@ def _refresh_one(db, service, account_key, definition, now):
              json.dumps(analyzed, ensure_ascii=False), observed_at),
         )
         if analyzed["decision"] == "accepted":
-            current.append(_raw_evidence(link, record, analyzed, definition))
-    service._save_profile(db, account_key, definition, current, now)
+            current.append(raw_evidence(link, record, analyzed, definition))
+    repo.save_profile(db, account_key, definition, current, now)
     return len(current)
 
 
 def refresh_for_job(context, job_id):
     """刷新受分析任务影响的账号画像，返回 (账号数, 主题数) 刷新计数。"""
-    service = InterestService(context)
     with closing(connect(context=context, readonly=True)) as ro:
         definitions = _active_definitions(ro)
         accounts = _affected_accounts(ro, job_id)
@@ -115,7 +113,7 @@ def refresh_for_job(context, job_id):
             for key in accounts:
                 try:
                     with db:
-                        _refresh_one(db, service, key, defn, now)
+                        _refresh_one(db, key, defn, now)
                     refreshed += 1
                     topics_seen.add(defn["topic"])
                 except Exception:

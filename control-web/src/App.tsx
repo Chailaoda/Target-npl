@@ -21,8 +21,9 @@ export { makeTask } from './types'
 export type { Policy, Collection, Task, Bundle } from './types'
 
 const THEME_KEY = 'npl_theme'
+// Reading workspace is the default (ADR-02); a saved choice always wins.
 const readTheme = (): 'dark' | 'light' => {
-  try { return localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark' } catch { return 'dark' }
+  try { return localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light' } catch { return 'light' }
 }
 
 const pages: Record<View, [string, string]> = {

@@ -4,6 +4,28 @@
 
 此仓库只包含通用源码、脱敏测试与重新编写的中性示例。不包含使用者的筛选方向、个人模板、任务记录、密钥、登录资料或真实采集内容。七个平台的代码接入不代表已经逐个平台完成在线登录与真实业务验收。
 
+## 工作台结构
+
+控制端为单一前端工程 `control-web/`，分五个视图：
+
+| 视图 | 用途 |
+| --- | --- |
+| 任务配置 | 目标描述、词库、平台与额度；规则试测在同一页完成 |
+| 实时情报流 | 采集与筛选的实时滚动结果，可把命中原句送回试测 |
+| 人物发现 | 按任意兴趣主题，从已有公开行为证据中发现账号 |
+| 复核与冲突 | 同一条内容被两个账号认领时人工裁决；`J/K` 选条、`A` 接受、`R` 驳回、冲突面板 `1/2` 改判 |
+| 版本与备份 | 每次保存生成不可变快照，可恢复、导入、导出 |
+
+后端分层（标准库实现，无第三方运行时依赖）：
+
+- `content_screening/interests/scoring.py` — 纯函数：字面证据、分句极性、覆盖率与衰减评分，不读写数据库
+- `content_screening/interests/repository.py` — 全部兴趣相关 SQL
+- `content_screening/interests/service.py` / `conflicts.py` / `profiles.py` — 用例编排、冲突裁决、账号读模型
+- `content_screening/http_api/` — 声明式路由表（`router.py`）、领域处理器与常驻预览进程
+- `content_screening/control_server.py` — HTTP 外壳：本机校验、CSRF Token、JSON 体积限制、日志与错误编号
+
+界面默认使用低眩光浅色阅读主题，可切换柔和深色；两套主题的正文与次级文字均满足 WCAG AA（≥ 4.5:1），分值、计数与时间戳统一使用等宽数字。
+
 ## Windows 快速开始
 
 需要 Python 3.12+、Git、Node.js/npm；在线采集还需要 Chrome 及独立安装的 MediaCrawler。
@@ -16,7 +38,7 @@ npm --prefix control-web run build
 .\.venv\Scripts\python.exe -X utf8 scripts/start_control.py --open
 ```
 
-`init_local.py` 只创建缺失配置，不覆盖已有文件。生成的 `config/`、`profiles/` 均被 Git 忽略。示例关键词“示例活动”仅用于离线测试，请在本机修改后再执行采集。
+`init_local.py` 只创建缺失配置，不覆盖已有文件。生成的 `config/`、`profiles/`、`deployment.json` 均被 Git 忽略；`deployment.json` 用 `app_root`/`state_root` = `"."` 指向仓库自身，因此整个目录可以复制到任意盘符或另一台机器，重建发布摘要后即可通过预检。示例关键词“示例活动”仅用于离线测试，请在本机修改后再执行采集。
 
 Web 服务仅监听本机。任务会保存不可变版本；人工锁定字段、ETag 冲突检测、采集额度与模型调用额度仍由代码校验。地点和时间条件是内容证据的后处理，不是平台原生搜索过滤。
 

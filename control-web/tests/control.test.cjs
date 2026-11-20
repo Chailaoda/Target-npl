@@ -41,11 +41,11 @@ test('distribution includes no personalized presets',async()=>{
 
 test('sandbox verdict and theme switch work without network',async()=>{
  render(React.createElement(App));await screen.findByLabelText('筛选目标');
- assert.equal(document.documentElement.dataset.theme,'dark');
+ assert.equal(document.documentElement.dataset.theme,'light');
  fireEvent.click(screen.getByRole('button',{name:'运行判定'}));
  await screen.findByText('潜在沾边');assert.ok(screen.getByText('本地测试'));
  fireEvent.click(screen.getByRole('button',{name:'切换明暗主题'}));
- assert.equal(document.documentElement.dataset.theme,'light');assert.equal(localStorage.getItem('npl_theme'),'light');
+ assert.equal(document.documentElement.dataset.theme,'dark');assert.equal(localStorage.getItem('npl_theme'),'dark');
 });
 
 test('platform tiles stay a draft and never open login windows automatically',async()=>{

@@ -58,7 +58,7 @@ class ServerLoggingTests(unittest.TestCase):
         return self.opener.open(request)
 
     def test_unhandled_error_returns_error_id_and_writes_the_stack(self):
-        with patch("content_screening.control_server.analysis_policy", side_effect=RuntimeError("boom")):
+        with patch("content_screening.http_api.handlers_task.analysis_policy", side_effect=RuntimeError("boom")):
             with self.assertRaises(urllib.error.HTTPError) as caught:
                 self.post("/api/validate", {"bundle": self.bundle})
         self.assertEqual(caught.exception.code, 500)
@@ -71,7 +71,7 @@ class ServerLoggingTests(unittest.TestCase):
         self.assertIn("boom", text)
 
     def test_log_never_records_the_control_token(self):
-        with patch("content_screening.control_server.analysis_policy", side_effect=RuntimeError("boom")):
+        with patch("content_screening.http_api.handlers_task.analysis_policy", side_effect=RuntimeError("boom")):
             with self.assertRaises(urllib.error.HTTPError):
                 self.post("/api/validate?token=%s" % self.token, {"bundle": self.bundle})
         text = self.log.read_text(encoding="utf-8")

@@ -1,62 +1,70 @@
 @tailwind base;
 @tailwind utilities;
 
-/* ---------- Design tokens ---------- */
+/* ---------- Design tokens ----------
+   Default is a low-glare reading workspace; the dark theme is a soft charcoal
+   variant of the same scale. Body text and secondary labels both clear WCAG AA
+   (>= 4.5:1) in either theme, and every number renders with tabular figures so
+   scores and counters stay aligned. */
 :root,
-:root[data-theme='dark'] {
-  color-scheme: dark;
-  --bg: #090a0c;
-  --bg-side: #0c0e11;
-  --panel: #111317;
-  --panel-2: #161a1f;
-  --panel-3: #1c2127;
-  --input-bg: #0d0f12;
-  --hover: rgba(255, 255, 255, 0.04);
-  --line: rgba(255, 255, 255, 0.07);
-  --line-soft: rgba(255, 255, 255, 0.045);
-  --line-strong: rgba(255, 255, 255, 0.12);
-  --text: #e9ecef;
-  --text-2: #a3aab4;
-  --text-3: #6c737d;
-  --accent: #2ee6a6;
-  --on-accent: #04130d;
-  --accent-soft: rgba(46, 230, 166, 0.1);
-  --accent-line: rgba(46, 230, 166, 0.45);
-  --accent-glow: rgba(46, 230, 166, 0.55);
-  --exact: #ff7a45;
-  --potential: #7aa2ff;
-  --violet: #b794ff;
-  --warn: #f5b84a;
-  --danger: #ff5c7a;
-  --shadow: 0 18px 50px -20px rgba(0, 0, 0, 0.7);
-}
-
 :root[data-theme='light'] {
   color-scheme: light;
-  --bg: #f5f6f8;
-  --bg-side: #eef0f3;
+  --bg: #f8fafc;
+  --surface: #ffffff;
+  --bg-side: #f1f5f9;
   --panel: #ffffff;
-  --panel-2: #f8f9fb;
-  --panel-3: #ffffff;
-  --input-bg: #fbfbfc;
+  --panel-2: #f8fafc;
+  --panel-3: #f1f5f9;
+  --input-bg: #ffffff;
   --hover: rgba(15, 23, 42, 0.04);
-  --line: rgba(15, 23, 42, 0.08);
-  --line-soft: rgba(15, 23, 42, 0.05);
-  --line-strong: rgba(15, 23, 42, 0.14);
-  --text: #111418;
-  --text-2: #4b5360;
-  --text-3: #8a919b;
-  --accent: #0c9f72;
+  --border: #e2e8f0;
+  --line: #e2e8f0;
+  --line-soft: #eef2f6;
+  --line-strong: #cbd5e1;
+  --text: #0f172a;
+  --text-2: #475569;
+  --text-3: #64748b;
+  --accent: #1d4ed8;
   --on-accent: #ffffff;
-  --accent-soft: rgba(12, 159, 114, 0.09);
-  --accent-line: rgba(12, 159, 114, 0.45);
-  --accent-glow: rgba(12, 159, 114, 0.4);
-  --exact: #e2582a;
-  --potential: #3f6fe6;
-  --violet: #7c4ddb;
-  --warn: #b7791f;
-  --danger: #d9365a;
-  --shadow: 0 18px 50px -24px rgba(15, 23, 42, 0.25);
+  --accent-soft: rgba(29, 78, 216, 0.08);
+  --accent-line: rgba(29, 78, 216, 0.38);
+  --accent-glow: rgba(29, 78, 216, 0.22);
+  --exact: #c2410c;
+  --potential: #1d4ed8;
+  --violet: #6d28d9;
+  --warn: #b45309;
+  --danger: #b91c1c;
+  --shadow: 0 18px 50px -26px rgba(15, 23, 42, 0.18);
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #111827;
+  --surface: #18202f;
+  --bg-side: #0f1623;
+  --panel: #18202f;
+  --panel-2: #1b2434;
+  --panel-3: #212c3d;
+  --input-bg: #131a26;
+  --hover: rgba(255, 255, 255, 0.05);
+  --border: #283548;
+  --line: #283548;
+  --line-soft: #223044;
+  --line-strong: #364860;
+  --text: #e2e8f0;
+  --text-2: #a7b4c6;
+  --text-3: #8494a8;
+  --accent: #60a5fa;
+  --on-accent: #0b1220;
+  --accent-soft: rgba(96, 165, 250, 0.12);
+  --accent-line: rgba(96, 165, 250, 0.45);
+  --accent-glow: rgba(96, 165, 250, 0.28);
+  --exact: #fbbf24;
+  --potential: #93c5fd;
+  --violet: #c4b5fd;
+  --warn: #fbbf24;
+  --danger: #f87171;
+  --shadow: 0 18px 50px -24px rgba(0, 0, 0, 0.55);
 }
 
 :root {
@@ -71,6 +79,7 @@ body {
   color: var(--text);
   font-family: var(--sans);
   font-size: 14px;
+  font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
 }
 ::selection { background: var(--accent-soft); color: var(--text); }
