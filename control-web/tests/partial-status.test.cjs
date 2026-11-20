@@ -18,7 +18,7 @@ function load(entry) {
   return m.exports
 }
 
-const { taskStatusLabel } = load('src/RunMonitor.tsx')
+const { taskStatusLabel, feedNeedsReset } = load('src/RunMonitor.tsx')
 
 test('partial overall status is displayed as 部分完成', () => {
   assert.equal(taskStatusLabel('partial'), '部分完成')
@@ -41,4 +41,12 @@ test('a failed analysis keeps its failure status even when collection is incompl
 test('unknown status falls back to the raw value instead of claiming success', () => {
   assert.equal(taskStatusLabel('some_new_status'), 'some_new_status')
   assert.equal(taskStatusLabel('some_new_status', true), 'some_new_status')
+})
+
+test('a shrinking authoritative total forces the temporary feed to reset', () => {
+  assert.equal(feedNeedsReset(null, 0), false)
+  assert.equal(feedNeedsReset(271, 271), false)
+  assert.equal(feedNeedsReset(271, 357), false)
+  assert.equal(feedNeedsReset(271, 0), true)
+  assert.equal(feedNeedsReset(357, 271), true)
 })

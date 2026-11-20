@@ -37,10 +37,13 @@ export interface LiveData {
   status: string
   phase?: string
   collection: {
+    status?: string
     requests?: number
     active_platform?: string
     platforms?: string[]
-    platform_statuses?: { platform: string; status: string; requests?: number }[]
+    warning_count?: number
+    warnings?: { platform?: string; code?: string; post_id?: string }[]
+    platform_statuses?: { platform: string; status: string; requests?: number; warning_count?: number }[]
   }
   captured: CapturedItem[]
   captured_total: number
@@ -74,7 +77,7 @@ const statusNames: Record<string, string> = {
   completed: '已完成',
   completed_with_review: '已完成 · 有待复核',
   failed: '失败',
-  interrupted: '已中断',
+  interrupted: '已中断 / 未启动',
   needs_user_login: '等待本人登录',
   partial: '部分完成'
 }
@@ -85,6 +88,12 @@ const statusNames: Record<string, string> = {
 export function taskStatusLabel(status: string, collectionIncomplete = false): string {
   if (collectionIncomplete && status.startsWith('completed')) return '部分完成（采集不完整）'
   return statusNames[status] || status
+}
+
+// A temporary child dataset can be replaced by an empty/unmerged parent batch.
+// The authoritative total must never go backwards while stale feed rows stay.
+export function feedNeedsReset(previousTotal: number | null, currentTotal: number): boolean {
+  return previousTotal !== null && currentTotal < previousTotal
 }
 
 // 平台通道状态：[文案, 视觉状态, 颜色]
@@ -197,7 +206,7 @@ export default function RunMonitor({
   onAddBlacklistWord,
   onRequestOpenLogin
 }: {
-  run: { run_id: string; status: string; phase?: string; collection_incomplete?: boolean; result?: { report: string } } | null
+  run: { run_id: string; status: string; phase?: string; message?: string; collection_incomplete?: boolean; result?: { report: string } } | null
   live: LiveData | null
   error?: string
   onSendToTest?: (text: string, context?: string) => void
@@ -212,6 +221,7 @@ export default function RunMonitor({
   const [hovering, setHovering] = useState(false)
   const [manualPause, setManualPause] = useState(false)
   const [throughput, setThroughput] = useState<number[]>([])
+  const [feedNotice, setFeedNotice] = useState('')
   const seen = useRef(new Set<string>())
   const queue = useRef<CapturedItem[]>([])
   const lastTotal = useRef<number | null>(null)
@@ -226,16 +236,31 @@ export default function RunMonitor({
     setFeed([])
     setQueued(0)
     setThroughput([])
+    setFeedNotice('')
   }, [run?.run_id])
 
   // 新到达的记录先进入队列，再匀速放出，形成连续滚动的信息流
   useEffect(() => {
     if (!live) return
+    const total = live.captured_total || 0
+    const reset = feedNeedsReset(lastTotal.current, total)
+    if (reset) {
+      // The child preview was not accepted into the authoritative parent batch.
+      // Never keep those temporary rows alongside a smaller final total.
+      seen.current = new Set()
+      queue.current = []
+      setFeed([])
+      setQueued(0)
+      setThroughput([])
+      setFeedNotice(live.status === 'failed' || live.collection?.status === 'failed'
+        ? '本次采集未通过校验，未合并的临时记录已从信息流清除；这些记录没有进入分析。'
+        : '权威批次已完成校验，信息流已按最终数据重置。')
+    }
     const fresh = (live.captured || []).filter(item => !seen.current.has(item.id))
     const firstBatch = seen.current.size === 0
     fresh.forEach(item => seen.current.add(item.id))
     if (fresh.length) {
-      if (firstBatch || !running) {
+      if (firstBatch || !running || reset) {
         const at = clock()
         setFeed(prev => [...fresh.map(item => ({ ...item, at, fresh: false })).reverse(), ...prev].slice(0, FEED_LIMIT))
       } else {
@@ -243,10 +268,11 @@ export default function RunMonitor({
         setQueued(queue.current.length)
       }
     }
-    const total = live.captured_total || 0
-    if (lastTotal.current !== null) setThroughput(prev => [...prev, Math.max(0, total - lastTotal.current!)].slice(-36))
+    if (!reset && lastTotal.current !== null) {
+      setThroughput(prev => [...prev, Math.max(0, total - lastTotal.current!)].slice(-36))
+    }
     lastTotal.current = total
-  }, [live])
+  }, [live, running])
 
   useEffect(() => {
     if (paused) return
@@ -295,6 +321,7 @@ export default function RunMonitor({
     (personTab === 'exact' ? p.isExact : !p.isExact && p.isPotential) && passes(p.records.map(r => r.text).join(' '))
   )
   const visibleFeed = feed.filter(item => passes(item.text))
+  const warningCount = live?.collection?.warning_count ?? live?.collection?.warnings?.length ?? 0
 
   if (!run) {
     return (
@@ -333,6 +360,13 @@ export default function RunMonitor({
       </div>
 
       {error && <div className="lock-note" style={{ color: 'var(--danger)' }}>读取实时数据失败：{error}</div>}
+      {run.status === 'interrupted' && <div className="lock-note" style={{ color: 'var(--warn)' }}>
+        {run.message || '该任务没有完成。'} 没有实时内容滚动不是卡住，而是本次任务未进入采集。请回到「任务配置」检查后重新开始抓取。
+      </div>}
+      {feedNotice && <div className="lock-note" style={{ color: 'var(--warn)' }}>{feedNotice}</div>}
+      {warningCount > 0 && <div className="lock-note" style={{ color: 'var(--warn)' }}>
+        本批次有 {warningCount} 条作品的评论数据异常，已跳过这些作品并继续采集、分析其余内容；不是整批失败。
+      </div>}
 
       <div className="kpis">
         <Kpi label="已采集内容" value={live?.captured_total ?? 0} unit="条" sub={running ? `≈ ${perMinute} 条 / 分钟` : `请求 ${live?.collection?.requests ?? 0} 次`} icon={<Activity size={13} />}>

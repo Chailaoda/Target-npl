@@ -12,6 +12,7 @@ import {
   Lock,
   Moon,
   Play,
+  Users,
   RotateCcw,
   Save,
   SlidersHorizontal,
@@ -25,6 +26,7 @@ import { platformNames } from './platforms'
 import RunMonitor, { type LiveData } from './RunMonitor'
 import TagInput from './components/TagInput'
 import TopStatusBar, { phaseNames } from './components/TopStatusBar'
+import InterestDiscovery from './InterestDiscovery'
 import {
   updatePatterns,
   mergeSavedEdits,
@@ -133,7 +135,7 @@ type PreviewResult = {
   evidence?: Record<string, any>
 }
 
-type View = 'workbench' | 'monitor' | 'history'
+type View = 'workbench' | 'monitor' | 'history' | 'discover'
 
 export const makeTask = (bundle: Bundle): Task => ({
   schema_version: 1,
@@ -155,7 +157,8 @@ const readTheme = () => {
 const pages: Record<View, [string, string]> = {
   workbench: ['任务配置', '描述目标、维护词库、选择平台，然后开始抓取'],
   monitor: ['实时情报流', '后台采集与模型筛选的结果在这里实时滚动'],
-  history: ['版本与备份', '每次保存都会生成快照，可随时恢复或导入导出']
+  history: ['版本与备份', '每次保存都会生成快照，可随时恢复或导入导出'],
+  discover: ['人物发现', '输入任意兴趣，从已有公开行为证据中发现账号']
 }
 
 function Card({ step, title, desc, aside, children, className = '' }: { step?: string; title: string; desc?: string; aside?: ReactNode; children: ReactNode; className?: string }) {
@@ -526,6 +529,7 @@ export default function App() {
   const navItems: [View, string, ReactNode][] = [
     ['workbench', '任务配置', <SlidersHorizontal size={16} key="w" />],
     ['monitor', '实时情报流', <Activity size={16} key="m" />],
+    ['discover', '人物发现', <Users size={16} key="d" />],
     ['history', '版本与备份', <History size={16} key="h" />]
   ]
   const verdict = testPreview
@@ -605,6 +609,8 @@ export default function App() {
         />
 
         <main className="content">
+          {tab === 'discover' && <InterestDiscovery api={api} />}
+
           {tab === 'workbench' && (
             <div className="workbench">
               <div className="stack">
