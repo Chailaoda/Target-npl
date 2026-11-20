@@ -7,3 +7,14 @@ dependencies = []
 
 [tool.uv]
 package = false
+
+# Static gate only. The runtime stays standard-library-only; ruff is an
+# optional developer tool (`uvx ruff check`). Rules are limited to syntax and
+# undefined-name errors so the gate is meaningful instead of a style debt list.
+[tool.ruff]
+line-length = 160
+target-version = "py312"
+exclude = [".venv", "vendor", "third_party", "tmp", "node_modules", "control-web"]
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]

@@ -1,5 +1,6 @@
 """Durable normalization, multidimensional analysis, review and local reports."""
 import argparse
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from contextlib import closing
 from datetime import datetime, timezone
 import html
@@ -70,7 +71,7 @@ def save_abstention(db, job_id, source_hash, key, policy_hash, record, policy, c
     db.execute("UPDATE v2_tasks SET status='needs_review',error_code=? WHERE job_id=? AND source_hash=?", (code, job_id, source_hash))
 
 
-def run(input_path, policy_path, db_path, output, mode="rules", connection_path="config/connection.json", max_calls=40, analyzer=None, job_id=None,task=None,config_revision=None,on_start=None,attribution_authority="raw_import"):
+def run(input_path, policy_path, db_path, output, mode="rules", connection_path="config/connection.json", max_calls=40, analyzer=None, job_id=None,task=None,config_revision=None,on_start=None,attribution_authority="raw_import",budget=None):
     policy = load_policy(policy_path)
     if task is not None:validate_task(task)
     observations = read_export(input_path)
@@ -152,50 +153,96 @@ def run(input_path, policy_path, db_path, output, mode="rules", connection_path=
             _ingest_accounts(db, observations, utcnow(), fingerprint, attribution_authority)
         if on_start is not None:on_start(job_id)
         calls, reused, errors, tokens, consecutive_errors = 0, 0, 0, 0, 0
+        pending_items = []
+        for source_hash, record in unique.items():
+            key, context, missing = tasks[source_hash]
+            if key in cached:
+                reused += 1
+                with db:
+                    state = "needs_review" if cached[key].get("engine") == "quarantined_model_output" else "completed"
+                    db.execute("UPDATE v2_tasks SET status=?,error_code=NULL WHERE job_id=? AND source_hash=?", (state, job_id, source_hash))
+                continue
+            pending_items.append((source_hash, record, key, context, missing))
+
+        def analyze_one(item):
+            """Worker body: one record in, one result out. No database access."""
+            source_hash, record, key, context, missing = item
+            has_text = bool(record["text"].strip())
+            was_called = bool(mode == "ark" and has_text)
+            # An injected analyzer is honoured in both modes (tests, replay),
+            # but only ark mode counts as a paid model call.
+            use_analyzer = has_text and analyzer is not None
+            result = analyzer(record, context) if use_analyzer else local_analyze(record, policy, context)
+            if not record["text"].strip():
+                result["reason"] = "无文字正文，保留源记录；未执行图片 OCR 或媒体分析，不判为无兴趣。"
+                result["quality_flags"].append("empty_text_no_ocr")
+            result["context_missing"] = missing
+            return result, was_called
+
+        if analyzer is None and mode == "ark" and any(record["text"].strip() for _, record, *_ in pending_items):
+            analyzer = ark_analyzer(config, policy)
+        concurrency = 1
+        if mode == "ark":
+            concurrency = max(1, min(int((config or {}).get("llm_concurrency", 4)), 6))
+        reserved = 0
+        if budget is not None and mode == "ark":
+            wanted = sum(1 for _, record, *_ in pending_items if record["text"].strip())
+            reserved = budget.reserve_api_calls(wanted)
+            if reserved < wanted:
+                # Give back the tail we were not granted; it stays 'pending' for
+                # the next batch instead of being called without a budget.
+                drop = wanted - reserved
+                kept = []
+                for item in reversed(pending_items):
+                    if drop and item[1]["text"].strip():
+                        drop -= 1
+                        continue
+                    kept.append(item)
+                pending_items = list(reversed(kept))
         try:
-            for source_hash, record in unique.items():
-                key, context, missing = tasks[source_hash]
-                if key in cached:
-                    reused += 1
-                    with db:
-                        state = "needs_review" if cached[key].get("engine") == "quarantined_model_output" else "completed"
-                        db.execute("UPDATE v2_tasks SET status=?,error_code=NULL WHERE job_id=? AND source_hash=?", (state, job_id, source_hash))
-                    continue
-                was_called = False
-                try:
-                    if analyzer is None and mode == "ark" and record["text"].strip():
-                        analyzer = ark_analyzer(config, policy)
-                    if mode == "ark" and record["text"].strip():
-                        calls += 1
-                        was_called = True
-                    result = analyzer(record, context) if analyzer and record["text"].strip() else local_analyze(record, policy, context)
-                    if not record["text"].strip():
-                        result["reason"] = "无文字正文，保留源记录；未执行图片 OCR 或媒体分析，不判为无兴趣。"
-                        result["quality_flags"].append("empty_text_no_ocr")
-                    result["context_missing"] = missing
-                    consecutive_errors = 0
-                    tokens += result.get("usage", {}).get("total_tokens", 0)
-                    # Each success is committed independently: interrupted jobs
-                    # can resume using completed analyses without duplicate calls.
-                    with db:
-                        db.execute("INSERT INTO v2_attempts(job_id,analysis_key,api_called,status,error_code,usage_json,created_at) VALUES (?,?,?,'completed',NULL,?,?)", (job_id, key, int(was_called), json.dumps(result.get("usage", {})), utcnow()))
-                        db.execute("INSERT OR IGNORE INTO v2_analyses VALUES (?,?,?,?,?,?)", (key, source_hash, interpretation_hash, json.dumps(context, ensure_ascii=False), json.dumps(result, ensure_ascii=False), utcnow()))
-                        db.execute("UPDATE v2_tasks SET status='completed',error_code=NULL WHERE job_id=? AND source_hash=?", (job_id, source_hash))
-                except (ValueError, OSError) as error:
-                    errors += 1
-                    consecutive_errors += 1
-                    code = getattr(error, "validation_code", type(error).__name__)
-                    usage = getattr(error, "usage", {})
-                    tokens += usage.get("total_tokens", 0)
-                    # Never store arbitrary exception bodies or model responses.
-                    with db:
-                        db.execute("INSERT INTO v2_attempts(job_id,analysis_key,api_called,status,error_code,usage_json,created_at) VALUES (?,?,?,'failed',?,?,?)", (job_id, key, int(was_called), code, json.dumps(usage), utcnow()))
-                        db.execute("UPDATE v2_tasks SET status='failed',error_code=? WHERE job_id=? AND source_hash=?", (code, job_id, source_hash))
-                        if getattr(error, "validation_code", None):
-                            save_abstention(db, job_id, source_hash, key, interpretation_hash, record, policy, context, missing, code)
-                    if consecutive_errors >= 10:
-                        break  # 提升容错弹性，只有连续10条系统性严重异常才熔断保护
+            # Network I/O runs concurrently; every write stays on this thread
+            # and this single connection, so SQLite sees one ordered writer.
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                futures = {pool.submit(analyze_one, item): item for item in pending_items}
+                for future in as_completed(futures):
+                    source_hash, record, key, context, missing = futures[future]
+                    try:
+                        result, was_called = future.result()
+                        if was_called:
+                            calls += 1
+                        consecutive_errors = 0
+                        tokens += result.get("usage", {}).get("total_tokens", 0)
+                        # Each success is committed independently: interrupted
+                        # jobs resume from completed analyses without duplicates.
+                        with db:
+                            db.execute("INSERT INTO v2_attempts(job_id,analysis_key,api_called,status,error_code,usage_json,created_at) VALUES (?,?,?,'completed',NULL,?,?)", (job_id, key, int(was_called), json.dumps(result.get("usage", {})), utcnow()))
+                            db.execute("INSERT OR IGNORE INTO v2_analyses VALUES (?,?,?,?,?,?)", (key, source_hash, interpretation_hash, json.dumps(context, ensure_ascii=False), json.dumps(result, ensure_ascii=False), utcnow()))
+                            db.execute("UPDATE v2_tasks SET status='completed',error_code=NULL WHERE job_id=? AND source_hash=?", (job_id, source_hash))
+                    except CancelledError:
+                        # The circuit breaker stopped queued work; these rows
+                        # stay pending so a resume run retries them.
+                        continue
+                    except (ValueError, OSError) as error:
+                        errors += 1
+                        consecutive_errors += 1
+                        code = getattr(error, "validation_code", type(error).__name__)
+                        usage = getattr(error, "usage", {})
+                        tokens += usage.get("total_tokens", 0)
+                        # Never store arbitrary exception bodies or model responses.
+                        with db:
+                            db.execute("INSERT INTO v2_attempts(job_id,analysis_key,api_called,status,error_code,usage_json,created_at) VALUES (?,?,?,'failed',?,?,?)", (job_id, key, 0, code, json.dumps(usage), utcnow()))
+                            db.execute("UPDATE v2_tasks SET status='failed',error_code=? WHERE job_id=? AND source_hash=?", (code, job_id, source_hash))
+                            if getattr(error, "validation_code", None):
+                                save_abstention(db, job_id, source_hash, key, interpretation_hash, record, policy, context, missing, code)
+                        if consecutive_errors >= 10:
+                            # Systemic failure: stop launching queued work. The
+                            # ones already in flight still land, so nothing is
+                            # lost or double-counted.
+                            for pending in futures:
+                                pending.cancel()
         finally:
+            if reserved:
+                budget.release_api_calls(max(0, reserved - calls))
             with db:
                 remaining = db.execute("SELECT count(*) FROM v2_tasks WHERE job_id=? AND status NOT IN ('completed','needs_review')", (job_id,)).fetchone()[0]
                 review_count = db.execute("SELECT count(*) FROM v2_tasks WHERE job_id=? AND status='needs_review'", (job_id,)).fetchone()[0]

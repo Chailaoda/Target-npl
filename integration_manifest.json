@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "base_commit": "4271d3fc6dd08c9cdc7ba5847ccc380f3ad5c99c",
-  "integration_head": "3a861912f14b7c040afe2ea01c23fc2a726cbb88",
+  "integration_head": "561ecfea0dfb8df66dafa569171dbd578fe42853",
   "service": "target-npl-rule-control",
   "protocol_version": 2,
   "backend_package": "content_screening",
-  "instance_binding": "3d4f078c807708789688da2c380d4c3a4fa3df24398ade12e35f944eec95de60",
-  "build_digest": "6604a6b1cf534b42864a82eebcc384164c5dda2e00e89838af29c184ed9bdf4a",
+  "instance_binding": "e16ed0dad5586909890494283f3251ed35c9998d872f1ab5787b89b92c3c80f7",
+  "build_digest": "cd137112072b40cf992501d8b6641e4ca2520ae6851d058b8402a1d5e5b65114",
   "file_count": 63,
-  "frozen_at": "2026-11-20T14:18:36Z",
+  "frozen_at": "2026-11-20T14:34:09Z",
   "path_normalization": "relative POSIX, UTF-8 byte order, raw SHA256 lowercase",
   "excluded": [
     ".git",
@@ -19,7 +19,7 @@
     "runtime outputs"
   ],
   "release_identity": {
-    "build_digest": "6604a6b1cf534b42864a82eebcc384164c5dda2e00e89838af29c184ed9bdf4a"
+    "build_digest": "cd137112072b40cf992501d8b6641e4ca2520ae6851d058b8402a1d5e5b65114"
   },
-  "manifest_digest": "5003972a780955614ce38b2fb4278b965a9fe1adde638111974c40a11c77d5ca"
+  "manifest_digest": "8b7475a118dc7c0f8f86939f6f883acf29ac94a0a49f8c02f1a08dcfcea8e002"
 }

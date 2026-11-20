@@ -4,6 +4,8 @@ from contextlib import contextmanager
 from datetime import datetime,timezone
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import mimetypes
 import os
 from pathlib import Path
@@ -20,9 +22,110 @@ from .rules_v2 import validate_policy,analysis_policy
 from .task_contract import validate_task,changed_paths,default_task
 from .runtime_context import RuntimeContext,current_context,set_context,preflight
 
+logger=logging.getLogger('content_screening.control_server')
+
+
+def configure_logging(context):
+    """Rotating, local-only server log with no request headers or query strings."""
+    folder=Path(context.state_root)/'output/control'
+    folder.mkdir(parents=True,exist_ok=True)
+    target=str((folder/'server.log').resolve())
+    for handler in list(logger.handlers):
+        if getattr(handler,'baseFilename',None)==target:
+            return logger
+        # A different state root (tests, integration instance) needs its own file.
+        logger.removeHandler(handler)
+        handler.close()
+    handler=RotatingFileHandler(target,maxBytes=2_000_000,backupCount=3,encoding='utf-8')
+    handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate=False
+    return logger
+
 
 class Conflict(ValueError):
     pass
+
+
+class PreviewWorker:
+    """Long-lived sandbox process for rule previews.
+
+    The interpreter start (~300-600ms) was paid on every keystroke preview.
+    The process is kept warm, requests are serialized by a lock, and a request
+    that exceeds its deadline gets the whole process killed: a runaway regex
+    must never be able to block the next preview or eat the CPU.
+    """
+
+    def __init__(self, context, timeout=4.0):
+        self.context = context
+        self.timeout = timeout
+        self._lock = threading.Lock()
+        self._proc = None
+        self._queue = None
+
+    def _spawn(self):
+        import queue
+        self._proc = subprocess.Popen(
+            [sys.executable, '-X', 'utf8', '-m', 'content_screening.rule_preview', '--daemon'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            cwd=str(self.context.app_root),
+            env=dict(os.environ, TARGET_NPL_DEPLOYMENT=str(self.context.deployment_path), PYTHONDONTWRITEBYTECODE='1'))
+        self._queue = queue.Queue()
+        stream = self._proc.stdout
+        def pump():
+            try:
+                for line in stream:
+                    self._queue.put(line)
+            except (OSError, ValueError):
+                pass
+        threading.Thread(target=pump, name='preview-reader', daemon=True).start()
+
+    def _alive(self):
+        return self._proc is not None and self._proc.poll() is None
+
+    def _kill(self):
+        proc, self._proc = self._proc, None
+        self._queue = None
+        if proc is None:
+            return
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+        for stream in (proc.stdin, proc.stdout):
+            try:
+                if stream:
+                    stream.close()
+            except OSError:
+                pass
+
+    def evaluate(self, payload, timeout=None):
+        import queue
+        timeout = self.timeout if timeout is None else timeout
+        with self._lock:
+            if not self._alive():
+                self._spawn()
+            try:
+                self._proc.stdin.write((json.dumps(payload, ensure_ascii=False) + '\n').encode('utf-8'))
+                self._proc.stdin.flush()
+                line = self._queue.get(timeout=timeout)
+            except queue.Empty:
+                self._kill()
+                raise subprocess.TimeoutExpired(cmd='rule_preview', timeout=timeout)
+            except (BrokenPipeError, OSError) as error:
+                self._kill()
+                raise subprocess.SubprocessError('规则预览进程已退出') from error
+            return json.loads(line)
+
+    def close(self):
+        with self._lock:
+            self._kill()
 
 
 @contextmanager
@@ -74,6 +177,7 @@ class RuleStore:
         # save from failing on a fresh state root or a test-owned root.
         self.versions.mkdir(parents=True,exist_ok=True)
         (self.root/'config').mkdir(parents=True,exist_ok=True)
+        self._history=None
 
     def state(self):
         with self.lock:
@@ -111,13 +215,23 @@ class RuleStore:
             with temporary.open('w',encoding='utf-8') as f:
                 f.write(json.dumps({"revision":revision,"bundle_hash":fingerprint(bundle)},indent=2));f.flush();os.fsync(f.fileno())
             temporary.replace(pointer)
+            self._history=None
             return self.state()
 
     def history(self):
-        entries=[]
-        for p in self.versions.glob('*/metadata.json'):
-            entries.append(json.loads(p.read_text(encoding='utf-8')))
-        return sorted(entries,key=lambda x:x['created_at'],reverse=True)[:100]
+        """Newest-first snapshot list, indexed once and invalidated on write.
+
+        Scanning every metadata.json on each /api/versions poll was O(versions)
+        disk I/O for an immutable list. save() is the only writer, so it is the
+        only place that has to drop the cache.
+        """
+        with self.lock:
+            if self._history is None:
+                entries=[]
+                for p in self.versions.glob('*/metadata.json'):
+                    entries.append(json.loads(p.read_text(encoding='utf-8')))
+                self._history=sorted(entries,key=lambda x:x['created_at'],reverse=True)[:100]
+            return [dict(entry) for entry in self._history]
 
     def version(self,revision):
         if len(revision)!=32 or any(c not in '0123456789abcdef' for c in revision):
@@ -133,6 +247,7 @@ class RuleStore:
 
 def make_server(port=8766,store=None,context=None):
     context=context or current_context()
+    configure_logging(context)
     store=store or RuleStore(context.state_root)
     from .task_service import TaskService
     from .task_schema import task_schema
@@ -140,11 +255,25 @@ def make_server(port=8766,store=None,context=None):
     tasks=TaskService(store)
     from .interest_service import InterestService
     interests=InterestService(context)
+    preview_worker=PreviewWorker(context)
     token=secrets.token_urlsafe(32)
     dist=context.app_root/'control-web/dist'
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*args):
-            pass
+            # BaseHTTPRequestHandler logs every request line, including query
+            # strings and the access token when it travels in a header dump.
+            # Only failures and writes are worth persisting.
+            if not logger.handlers:
+                return
+            # args = (format, requestline, code, size) when called by log_request
+            # and (format, message) when called by log_error.
+            try:
+                code=int(args[2]) if len(args)>=4 else 0
+            except (IndexError,TypeError,ValueError):
+                code=0
+            if self.command=='GET' and code and code<400:
+                return
+            logger.info('%s %s %s',self.command,urlsplit(self.path).path,code or '-')
 
         def send(self,status,body,content_type='application/json; charset=utf-8',report=False):
             if isinstance(body,(dict,list)):
@@ -237,6 +366,10 @@ def make_server(port=8766,store=None,context=None):
                 self.send(200,file.read_bytes(),mimetypes.guess_type(file)[0] or 'application/octet-stream')
             except (ValueError,TypeError,KeyError) as error:self.send(400,{"error":str(error)})
             except OSError:self.send(404,{"error":"配置文件不存在或暂不可读"})
+            except Exception:
+                err_id=uuid.uuid4().hex[:8]
+                logger.exception('Unhandled server error [err_id=%s method=%s path=%s]',err_id,self.command,urlsplit(self.path).path)
+                self.send(500,{"error":f"服务处理失败，请稍后重试（错误编号：{err_id}）","error_id":err_id})
 
         def do_POST(self):
             set_context(self.server.runtime_context)
@@ -275,7 +408,7 @@ def make_server(port=8766,store=None,context=None):
                 if route.startswith('/api/tasks/'):
                     name=route.rsplit('/',1)[1]
                     from .live_view import live
-                    methods={'plan':tasks.plan,'submit':tasks.submit,'validate':tasks.validate,'apply':tasks.apply,'patch':tasks.patch,'run':tasks.run,'status':tasks.status,'results':tasks.results,'live':lambda run_id:live(tasks,run_id)}
+                    methods={'plan':tasks.plan,'submit':tasks.submit,'validate':tasks.validate,'apply':tasks.apply,'patch':tasks.patch,'run':tasks.run,'status':tasks.status,'results':tasks.results,'live':lambda run_id,since_seq=None:live(tasks,run_id,since_seq)}
                     if name=='save-draft':
                         plan_id=obj['plan_id']
                         if not isinstance(plan_id,str) or len(plan_id)!=32 or any(c not in '0123456789abcdef' for c in plan_id):raise ValueError('plan_id 无效')
@@ -287,7 +420,7 @@ def make_server(port=8766,store=None,context=None):
                         return self.send(200,store.save(bundle,obj['etag'],actor='agent+human'))
                     if name not in methods:return self.send(404,{'error':'任务接口不存在'})
                     # Do not expose internal spawn/test parameters to a client.
-                    allowed={'plan':{'goal','base_etag'},'submit':{'goal','base_etag','request_id'},'validate':{'bundle'},'apply':{'bundle','base_etag'},'patch':{'operations','base_etag'},'run':{'revision','request_id'},'status':{'run_id'},'results':{'run_id','offset','limit'},'live':{'run_id'}}
+                    allowed={'plan':{'goal','base_etag'},'submit':{'goal','base_etag','request_id'},'validate':{'bundle'},'apply':{'bundle','base_etag'},'patch':{'operations','base_etag'},'run':{'revision','request_id'},'status':{'run_id'},'results':{'run_id','offset','limit'},'live':{'run_id','since_seq'}}
                     if not isinstance(obj,dict) or set(obj)-allowed[name]:raise ValueError('任务接口参数无效')
                     return self.send(200,methods[name](**obj))
                 if route=='/api/validate':
@@ -299,17 +432,25 @@ def make_server(port=8766,store=None,context=None):
                     validate_policy(obj['policy'])
                     if not isinstance(obj.get('text'),str) or not 1<=len(obj['text'])<=4000:raise ValueError("测试文本长度应为 1–4000 字符")
                     preview_input={'policy':obj['policy'],'text':obj['text'],'context_text':obj.get('context_text'),'task':obj.get('task')}
-                    result=subprocess.run([sys.executable,'-X','utf8','-m','content_screening.rule_preview'],input=json.dumps(preview_input,ensure_ascii=False).encode('utf-8'),capture_output=True,cwd=context.app_root,env=dict(os.environ,TARGET_NPL_DEPLOYMENT=str(context.deployment_path),PYTHONDONTWRITEBYTECODE='1'),timeout=4)
-                    payload=json.loads(result.stdout)
-                    return self.send(200 if result.returncode==0 else 400,payload)
+                    payload=preview_worker.evaluate(preview_input)
+                    return self.send(400 if 'error' in payload else 200,payload)
                 return self.send(404,{"error":"接口不存在"})
             except Conflict as error:self.send(409,{"error":str(error)})
             except subprocess.TimeoutExpired:self.send(400,{"error":"规则预览超时，请检查正则表达式"})
             except (ValueError,TypeError,KeyError) as error:self.send(400,{"error":str(error)})
-            except OSError:self.send(500,{"error":"配置暂未保存，请稍后重试；原生效版本未改变"})
+            except Exception:
+                err_id=uuid.uuid4().hex[:8]
+                logger.exception('Unhandled server error [err_id=%s method=%s path=%s]',err_id,self.command,urlsplit(self.path).path)
+                self.send(500,{"error":f"服务处理失败，原生效版本未改变（错误编号：{err_id}）","error_id":err_id})
     server=ThreadingHTTPServer(('127.0.0.1',port),Handler)
     server.runtime_context=context
     server.daemon_threads=True
+    server.preview_worker=preview_worker
+    close_server=server.server_close
+    def close_with_worker(*args,**kwargs):
+        try:preview_worker.close()
+        finally:close_server(*args,**kwargs)
+    server.server_close=close_with_worker
     return server
 
 

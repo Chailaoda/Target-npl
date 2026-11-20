@@ -68,7 +68,10 @@ def latest(service):
     return service.status(state['run_id'])
 
 
-def live(service,run_id):
+SEQ_SCALE = 1_000_000
+
+
+def live(service,run_id,since_seq=None):
     state=service.status(run_id)
     folder=service.runs/run_id
     dataset=state.get('dataset_id')
@@ -189,7 +192,38 @@ def live(service,run_id):
     person_potential = person_potential - person_exact
     exact_count = len(person_exact)
     potential_count = len(person_potential)
+    rows=list(captured)
+    total_candidates=len(candidates)
+    # One cursor for two streams: high digits = rows read from the raw files,
+    # low digits = accepted candidates. Both only ever move forward, so a
+    # client can ask for "everything after N" without extra server state.
+    seq=captured_total*SEQ_SCALE+total_candidates
+    full={'run_id':run_id,'status':state['status'],'phase':state.get('phase'),
+        'collection':collection,'captured':rows,'captured_total':captured_total,
+        'candidates':candidates[-200:],'candidate_total':total_candidates,'exact_count':exact_count,'potential_count':potential_count,'processed':processed,'needs_review':review,
+        'report_url':f'/reports/{run_id}' if state.get('result',{}).get('report') else None,
+        'next_seq':seq,'incremental':False}
+    if since_seq is None:
+        return full
+    try:
+        since=int(since_seq)
+    except (TypeError,ValueError) as error:
+        raise ValueError('since_seq 必须是非负整数') from error
+    if since<0:
+        raise ValueError('since_seq 必须是非负整数')
+    if since>seq:
+        return full
+    previous_rows,previous_candidates=divmod(since,SEQ_SCALE)
+    offset=max(0,captured_total-len(rows))
+    if previous_rows<offset or previous_candidates>total_candidates:
+        # The requested slice has already scrolled out of the bounded window:
+        # resync with a full payload instead of silently skipping records.
+        return full
     return {'run_id':run_id,'status':state['status'],'phase':state.get('phase'),
-        'collection':collection,'captured':list(captured),'captured_total':captured_total,
-        'candidates':candidates[-200:],'candidate_total':len(candidates),'exact_count':exact_count,'potential_count':potential_count,'processed':processed,'needs_review':review,
-        'report_url':f'/reports/{run_id}' if state.get('result',{}).get('report') else None}
+        'collection':collection,'incremental':True,'next_seq':seq,
+        'captured_delta':rows[previous_rows-offset:],
+        'candidates_delta':candidates[previous_candidates:],
+        'captured_total':captured_total,'candidate_total':total_candidates,
+        'exact_count':exact_count,'potential_count':potential_count,
+        'processed':processed,'needs_review':review,
+        'report_url':full['report_url']}

@@ -118,8 +118,8 @@ class AnalyzerWorker:
                     self.root / "output/scheduler", mode=mode,
                     connection_path=self.root / "config/connection.json", max_calls=max_calls,
                     task=task, config_revision=snapshot["revision"],
+                    budget=self.budget,
                 )
-                api_calls = result.get("api_calls", 0)
                 status = result.get("status")
                 if status in _COMPLETED:
                     done = list(hashes)
@@ -147,8 +147,6 @@ class AnalyzerWorker:
             done = []
 
         finish(self.queue, done, failures)
-        if self.budget and api_calls > 0:
-            self.budget.record_api_calls(api_calls)
         if done and result.get("job_id"):
             try:
                 from .profile_refresh import refresh_for_job
