@@ -42,7 +42,7 @@ class TaskLaunchStatusTests(unittest.TestCase):
             for relative in ("profiles/default.json", "config/collection.json"):
                 (root / relative).write_bytes((ROOT / relative).read_bytes())
             service = TaskService(RuleStore(root))
-            service.runs.mkdir(parents=True)
+            service.runs.mkdir(parents=True, exist_ok=True)
             context = RuntimeContext(root / "deployment.json", ROOT, root, {
                 "test_isolated": True, "database": {"relative_path": "data/festival.sqlite3"}
             })

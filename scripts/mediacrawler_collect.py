@@ -55,7 +55,12 @@ def publish_result(result, receipt=None):
     payload = json.dumps(result, ensure_ascii=False, indent=2)
     (ROOT / "output").mkdir(parents=True, exist_ok=True)
     if receipt:
-        receipt = Path(receipt).resolve()
+        # Relative receipts are project-relative, not CWD-relative: the
+        # launcher may chdir into the vendor tree before this runs.
+        receipt = Path(receipt)
+        if not receipt.is_absolute():
+            receipt = ROOT / receipt
+        receipt = receipt.resolve()
         if not receipt.is_relative_to(ROOT / "output"):
             raise ValueError("Receipt must stay in project output")
         receipt.parent.mkdir(parents=True, exist_ok=True)
@@ -183,6 +188,36 @@ def make_direct_client(**kwargs):
     return httpx.AsyncClient(**kwargs)
 
 
+async def fetch_post_comments(client, save_comment, post_id, state, settings, seen, save):
+    """Fetch comments for one post without letting one bad payload abort a run.
+
+    A malformed comment payload is a per-post data gap: record a warning, mark
+    the post done and continue with the next one. Transport or authorization
+    failures still propagate, because those mean the whole session is unusable
+    and silently continuing would produce a half-empty dataset.
+
+    Returns True when the post was processed, False when it was skipped.
+    """
+    if not settings["comments_per_post"] or post_id in state["comments_done"]:
+        return False
+    comments = await client.get_aweme_comments(post_id)
+    if not isinstance(comments, dict) or not isinstance(comments.get("comments"), list):
+        state.setdefault("warnings", []).append({"code": "COMMENT_DATA_MISSING", "post_id": post_id})
+        state["warning_count"] = len(state["warnings"])
+        state["comments_done"].append(post_id)
+        save()
+        return False
+    for comment in comments["comments"][:settings["comments_per_post"]]:
+        cid = str(comment.get("cid", ""))
+        if cid.isdigit() and cid not in seen and str(comment.get("aweme_id")) == post_id:
+            await save_comment(post_id, comment)
+            seen.add(cid)
+    state["comments"] = len(seen)
+    state["comments_done"].append(post_id)
+    save()
+    return True
+
+
 async def collect(settings, job, resume=False):
     import httpx
     from playwright.async_api import async_playwright
@@ -296,19 +331,8 @@ async def collect(settings, job, resume=False):
                     return obj
                 client.request = safe_request
                 async def fetch_comments(post_id):
-                    if not settings["comments_per_post"] or post_id in state["comments_done"]:
-                        return
-                    comments = await client.get_aweme_comments(post_id)
-                    if not isinstance(comments.get("comments"), list):
-                        raise ValueError("COMMENT_DATA_MISSING")
-                    for comment in comments["comments"][:settings["comments_per_post"]]:
-                        cid = str(comment.get("cid", ""))
-                        if cid.isdigit() and cid not in seen_comments and str(comment.get("aweme_id")) == post_id:
-                            await store.update_dy_aweme_comment(post_id, comment)
-                            seen_comments.add(cid)
-                    state["comments"] = len(seen_comments)
-                    state["comments_done"].append(post_id)
-                    save()
+                    await fetch_post_comments(client, store.update_dy_aweme_comment, post_id,
+                                              state, settings, seen_comments, save)
                 for post_id in sorted(seen_posts):
                     source_keyword_var.set(post_keywords[post_id])
                     await fetch_comments(post_id)

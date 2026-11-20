@@ -102,9 +102,9 @@ def classify(record, profile):
 
 
 def connect(path=None, *, readonly=False):
-    """Compatibility shim: legacy tables are created by explicit migration."""
+    """Compatibility shim: the legacy pipeline owns the database it names."""
     from .db_access import connect as resolve_connect
-    return resolve_connect(path, readonly=readonly)
+    return resolve_connect(path, readonly=readonly, provision=path is not None)
 
 
 def safe_url(url):

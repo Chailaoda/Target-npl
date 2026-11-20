@@ -42,9 +42,9 @@ class TaskService:
         from .control_server import RuleStore
         self.store=store or RuleStore();self.root=self.store.root
         self.runs=self.root/'data/task-runs'
-        from .runtime_context import current_context
-        if current_context().deployment.get("test_isolated"):
-            self.runs.mkdir(parents=True,exist_ok=True)
+        # Owned by the service: a fresh state root must not fail on first use.
+        self.runs.mkdir(parents=True,exist_ok=True)
+        (self.root/'output/task-runs').mkdir(parents=True,exist_ok=True)
 
     def get(self):
         state=self.store.state();state=copy.deepcopy(state)

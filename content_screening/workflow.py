@@ -23,9 +23,14 @@ def utcnow():
 
 
 def connect(path=None, *, readonly=False):
-    """Compatibility shim: schema creation belongs only to db_migrate."""
+    """Compatibility shim.
+
+    The deployed database is resolved and preflighted by db_access; an
+    explicit path (CLI --db, tests) is provisioned on demand because the
+    caller owns that file and asked for it by name.
+    """
     from .db_access import connect as resolve_connect
-    return resolve_connect(path, readonly=readonly)
+    return resolve_connect(path, readonly=readonly, provision=path is not None)
 
 
 def build_context(record, versions):

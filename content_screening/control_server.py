@@ -28,6 +28,7 @@ class Conflict(ValueError):
 @contextmanager
 def write_lock(path):
     import time
+    path.parent.mkdir(parents=True, exist_ok=True)
     deadline=time.monotonic()+10
     while True:
         stream=None
@@ -69,8 +70,10 @@ class RuleStore:
         self.root=Path(root) if root is not None else current_context().state_root
         self.lock=threading.RLock()
         self.versions=self.root/'data/control/versions'
-        if current_context().deployment.get("test_isolated"):
-            self.versions.mkdir(parents=True,exist_ok=True)
+        # The store owns these directories; creating them here keeps the first
+        # save from failing on a fresh state root or a test-owned root.
+        self.versions.mkdir(parents=True,exist_ok=True)
+        (self.root/'config').mkdir(parents=True,exist_ok=True)
 
     def state(self):
         with self.lock:

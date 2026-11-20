@@ -25,6 +25,41 @@ def _person_key(candidate):
     return f"{platform}:content:{candidate.get('id')}"
 
 
+def _find_job_db(root, job_id):
+    """Locate the database that actually holds this analysis job.
+
+    The live monitor serves one store, and that store's database name is not
+    guaranteed to equal the deployed one (tests and integration instances bind
+    their own file). Prefer the deployment-declared name, then fall back to any
+    SQLite file under data/ that already contains the job, so the viewer never
+    reports zero progress against the wrong file.
+    """
+    import sqlite3
+    from pathlib import Path
+    from .db_access import resolve_db_for
+    from .runtime_context import RuntimeErrorBase
+    ordered = []
+    try:
+        ordered.append(resolve_db_for(root))
+    except RuntimeErrorBase:
+        pass
+    data = Path(root) / "data"
+    if data.is_dir():
+        ordered += [p for p in sorted(data.glob("*.sqlite3")) if p not in ordered]
+    for path in ordered:
+        if not path.is_file():
+            continue
+        try:
+            with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+                if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v2_jobs'").fetchone():
+                    continue
+                if db.execute("SELECT 1 FROM v2_jobs WHERE job_id=?", (job_id,)).fetchone():
+                    return path
+        except sqlite3.Error:
+            continue
+    return None
+
+
 def latest(service):
     files=list(service.runs.glob('*/status.json'))
     if not files:return None
@@ -41,8 +76,6 @@ def live(service,run_id):
     if not dataset and pointer.exists():dataset=json.loads(pointer.read_text(encoding='utf-8')).get('dataset_id')
     captured=deque(maxlen=200);captured_total=0;collection={}
     sources=[]
-    from .db_access import resolve_db
-    from .runtime_context import current_context
     if dataset and re.fullmatch(r'\d{8}T\d{12}Z',dataset):
         source=service.root/'data/collections'/dataset
         checkpoint=source/'checkpoint.json'
@@ -115,8 +148,8 @@ def live(service,run_id):
             captured.append({'id':f'{platform}:{kind}:{cid}','platform':platform,'kind':kind,'text':str(text or '')[:2000],'keyword':row.get('keyword',''),'published_at':str(published or '')})
     job_id=state.get('analysis_job_id') or state.get('result',{}).get('job_id')
     candidates=[];processed=0;review=0
-    db_path=resolve_db()
-    if job_id and db_path.exists():
+    db_path=_find_job_db(service.root,job_id) if job_id else None
+    if db_path:
         import sqlite3
         from .workflow import projected_items
         with closing(sqlite3.connect(db_path.resolve().as_uri()+'?mode=ro',uri=True,timeout=2)) as db:

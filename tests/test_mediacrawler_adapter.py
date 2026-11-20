@@ -27,7 +27,9 @@ class AdapterTests(unittest.TestCase):
         launch.assert_not_called()
 
     def test_collection_config_is_bounded(self):
-        settings = adapter.load_settings(ROOT / "config/collection.json")
+        # Validate the shipped default, not the operator's personal copy of
+        # config/collection.json (which is gitignored and locally tuned).
+        settings = adapter.load_settings(ROOT / "examples/collection.example.json")
         self.assertEqual(settings["keywords"], ["示例活动"])
         self.assertLessEqual(settings["max_posts"], 60)
 
