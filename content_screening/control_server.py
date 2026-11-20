@@ -179,6 +179,11 @@ def make_server(port=8766,store=None,context=None):
                     return self.send(200,interests.search(query['topic'][0],**options))
                 if route=='/api/interests/analyze':
                     return self.send(200,interests.topic_status(query.get('topic',[''])[0]))
+                if route=='/api/accounts/conflicts':
+                    return self.send(200,interests.list_conflicts(
+                        status=query.get('status',['pending'])[0],
+                        account_key=query.get('account_key',[''])[0] or None,
+                        limit=query.get('limit',['50'])[0]))
                 if route.startswith('/api/accounts/'):
                     parts=route.split('/')
                     if len(parts)<4 or not parts[3]:return self.send(404,{'error':'账号不存在'})
@@ -245,6 +250,17 @@ def make_server(port=8766,store=None,context=None):
                     if not isinstance(obj,dict) or not {'evidence_id','action'} <= set(obj) or set(obj)-allowed:
                         raise ValueError('证据反馈参数无效')
                     return self.send(200,interests.feedback(**obj))
+                if route=='/api/accounts/conflicts/resolve':
+                    allowed={'platform','object_type','content_id','chosen_key','note'}
+                    if not isinstance(obj,dict) or not {'platform','object_type','content_id','chosen_key'}<=set(obj) or set(obj)-allowed:
+                        raise ValueError('冲突裁决参数无效')
+                    return self.send(200,interests.resolve_conflict(**obj))
+                if route=='/api/reviews':
+                    if not isinstance(obj,dict) or set(obj)!={'items'}:
+                        raise ValueError('人工复核参数无效')
+                    from .db_access import resolve_db
+                    from .workflow import review_many
+                    return self.send(200,review_many(resolve_db(context),obj['items']))
                 if route=='/api/platforms/open-login':
                     from .platforms import open_login
                     if not isinstance(obj,dict) or set(obj)!={'platform'}:raise ValueError('平台参数无效')

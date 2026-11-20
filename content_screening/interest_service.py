@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import math
 import re
+import sqlite3
 
 from .account_repository import analyzed_content_links
 from .db_access import connect
@@ -648,6 +649,103 @@ class InterestService:
             evidence = self._load_evidence(db, row["account_key"], row["topic"], version)
             self._save_profile(db, row["account_key"], definition, evidence, datetime.now(timezone.utc))
         return self.account(row["account_key"])
+
+    # ---- attribution conflict review (WP6) --------------------------------
+    def list_conflicts(self, status="pending", account_key=None, limit=50):
+        """Read-only view of attribution conflicts for the review workbench.
+
+        `current_authority` is read from the live content link, so the operator
+        sees what actually owns the content now rather than what the conflict
+        row recorded when it was first detected. Snippets come from the stored
+        raw sources and are truncated: the workbench shows evidence, not a post
+        archive.
+        """
+        from .account_repository import attribution_conflicts
+        if status not in ("pending", "resolved", "all"):
+            raise ValueError("冲突状态筛选无效")
+        if isinstance(limit, str) and limit.isdigit():
+            limit = int(limit)
+        if not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise ValueError("冲突数量上限应为 1–200 的整数")
+        if account_key is not None and (not isinstance(account_key, str) or len(account_key) > 200):
+            raise ValueError("账号标识无效")
+        with closing(self._connect(readonly=True)) as db:
+            rows = []
+            for state in (("pending", "resolved") if status == "all" else (status,)):
+                rows += [dict(r) for r in attribution_conflicts(db, status=state, account_key=account_key)]
+            rows.sort(key=lambda r: r["id"], reverse=True)
+            pending_total = sum(1 for r in rows if r["status"] == "pending")
+            items = [self._conflict_view(db, row) for row in rows[:limit]]
+        return {"items": items, "total_pending": pending_total}
+
+    def _conflict_view(self, db, row):
+        link = db.execute("""SELECT attribution_authority,source_hash FROM account_content_links
+            WHERE platform=? AND object_type=? AND content_id=? AND account_key=?""",
+                          (row["platform"], row["object_type"], row["content_id"], row["current_account_key"])).fetchone()
+        # Older conflict rows were written before source hashes were recorded;
+        # the live link still points at the text the operator has to judge.
+        snippet = self._conflict_snippet(
+            db, row["candidate_source_hash"], row["current_source_hash"],
+            link["source_hash"] if link else "")
+        return {
+            "conflict_id": row["id"],
+            "platform": row["platform"],
+            "object_type": row["object_type"],
+            "content_id": row["content_id"],
+            "current_key": row["current_account_key"],
+            "current_authority": link["attribution_authority"] if link else "",
+            "candidate_key": row["candidate_account_key"],
+            "candidate_authority": row["candidate_authority"],
+            "snippet": snippet,
+            "detected_at": row["first_seen_at"],
+            "status": row["status"],
+            "resolution": row["resolution"],
+        }
+
+    @staticmethod
+    def _conflict_snippet(db, *source_hashes, limit=280):
+        for source_hash in source_hashes:
+            if not source_hash:
+                continue
+            stored = db.execute("SELECT source_json FROM v2_sources WHERE source_hash=?", (source_hash,)).fetchone()
+            if not stored:
+                continue
+            try:
+                record = json.loads(stored["source_json"])
+            except ValueError:
+                continue
+            text = re.sub(r"\s+", " ", str(record.get("text") or "")).strip()
+            if text:
+                return text[:limit]
+        return ""
+
+    def resolve_conflict(self, platform, object_type, content_id, chosen_key, note=""):
+        """Confirm one attribution by hand; authority is always manual_review."""
+        from .account_repository import resolve_attribution_conflict
+        for name, value in (("platform", platform), ("object_type", object_type),
+                            ("content_id", content_id), ("chosen_key", chosen_key)):
+            if not isinstance(value, str) or not value.strip() or len(value) > 200:
+                raise ValueError(f"冲突裁决参数无效：{name}")
+        if not isinstance(note, str) or len(note) > 500:
+            raise ValueError("裁决说明不能超过 500 字符")
+        with closing(self._connect()) as db:
+            pending = db.execute("""SELECT id FROM account_attribution_conflicts
+                WHERE platform=? AND object_type=? AND content_id=? AND status='pending'
+                ORDER BY id DESC LIMIT 1""", (platform, object_type, content_id)).fetchone()
+            try:
+                active = resolve_attribution_conflict(
+                    db, platform, object_type, content_id, chosen_key,
+                    authority="manual_review", note=note)
+            except sqlite3.IntegrityError as error:
+                # Moving a link to an account that has no account row would
+                # break referential integrity; report it as a reviewable input
+                # problem instead of dropping the connection.
+                raise ValueError("裁决目标账号没有账号记录，无法完成归属迁移；请先重新采集该账号") from error
+            return {"resolved": True,
+                    "conflict_id": pending["id"] if pending else None,
+                    "active_account_key": active,
+                    "authority": "manual_review",
+                    "updated_at": utcnow()}
 
     def recent_topics(self, limit=8):
         limit = max(1, min(int(limit), 30))

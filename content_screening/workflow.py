@@ -303,6 +303,51 @@ def review(db_path, key, decision, note):
     return {"review_saved": True, "analysis_key": key, "decision": decision}
 
 
+REVIEW_DECISIONS = {"accept": "confirm", "reject": "reject", "needs_review": "uncertain"}
+
+
+def review_many(db_path, items):
+    """Batch human review for the workbench (accept / reject / needs_review).
+
+    Every key is validated before the first write: a single stale key returns a
+    400 with zero database changes, so a half-applied review batch can never be
+    mistaken for a complete one. Decisions map onto the stored vocabulary
+    (confirm / reject / uncertain) without changing it.
+    """
+    if not isinstance(items, list) or not 1 <= len(items) <= 100:
+        raise ValueError("复核条目应为 1–100 条")
+    normalized = []
+    for item in items:
+        if not isinstance(item, dict) or set(item) - {"analysis_key", "decision", "note"}:
+            raise ValueError("复核条目字段无效")
+        key = item.get("analysis_key")
+        decision = item.get("decision")
+        note = item.get("note", "") or ""
+        if not isinstance(key, str) or not 32 <= len(key) <= 128 or any(c not in "0123456789abcdef" for c in key):
+            raise ValueError("analysis_key 无效")
+        if decision not in REVIEW_DECISIONS:
+            raise ValueError("复核决定应为 accept / reject / needs_review")
+        if not isinstance(note, str) or len(note) > 500:
+            raise ValueError("复核说明不能超过 500 字符")
+        normalized.append((key, decision, note))
+    now = utcnow()
+    keys = [key for key, _, _ in normalized]
+    with closing(connect(db_path)) as db, db:
+        marks = ",".join("?" * len(keys))
+        found = {row[0] for row in db.execute(
+            f"SELECT analysis_key FROM v2_analyses WHERE analysis_key IN ({marks})", keys)}
+        missing = [key for key in keys if key not in found]
+        if missing:
+            raise ValueError(f"分析记录不存在：{missing[0][:12]}")
+        results = []
+        for key, decision, note in normalized:
+            values = (key, REVIEW_DECISIONS[decision], note, now)
+            db.execute("INSERT OR REPLACE INTO v2_reviews VALUES (?,?,?,?)", values)
+            db.execute("INSERT INTO v2_review_history(analysis_key,decision,note,updated_at) VALUES (?,?,?,?)", values)
+            results.append({"analysis_key": key, "decision": decision, "updated_at": now})
+    return {"updated": len(results), "results": results}
+
+
 def main():
     parser = argparse.ArgumentParser(description="MediaCrawler 采集与多维分析流水线")
     subs = parser.add_subparsers(dest="command", required=True)
