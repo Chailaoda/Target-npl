@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "service": "target-npl-rule-control",
+  "protocol_version": 2,
+  "backend_package": "content_screening",
+  "environment": "production",
+  "instance_id": "target-npl-production-8766",
+  "host": "127.0.0.1",
+  "port": 8766,
+  "app_root": ".",
+  "state_root": ".",
+  "database": {
+    "relative_path": "data/festival.sqlite3"
+  },
+  "policy": {
+    "allow_external_collection": true,
+    "allow_external_model": true,
+    "allow_external_login": true,
+    "allow_external_network": true
+  },
+  "base_commit": "",
+  "manifest": "integration_manifest.json",
+  "features": {
+    "wp4": true,
+    "formal_collection": true,
+    "os_network_rules": false
+  }
+}

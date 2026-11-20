@@ -132,26 +132,32 @@ def provision_legacy(path):
     return path
 
 
-def _open(path, *, readonly=False):
-    """Open with the concurrency profile this workload actually needs.
+def apply_pragmas(conn, *, readonly=False):
+    """Apply the single concurrency policy used by every project database.
 
-    ThreadingHTTPServer, the orchestrator and the analyzer worker all touch the
-    same file from different threads. WAL plus a 10s busy_timeout removes the
-    "database is locked" class of failure; the read-only branch must not try to
-    switch journal mode (SQLite rejects it on a read-only handle), so it only
-    sets the retry budget and refuses writes explicitly.
+    Writers need WAL so readers never block them and a 10s retry budget so a
+    short burst of concurrent writers queues instead of failing. Read-only
+    handles must skip the journal-mode switch (SQLite rejects it) and use
+    query_only to make accidental writes fail loudly.
     """
     if readonly:
-        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10.0)
         conn.execute("PRAGMA busy_timeout = 10000")
         conn.execute("PRAGMA query_only = ON")
         return conn
-    conn = sqlite3.connect(path, timeout=10.0)
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA busy_timeout = 10000")
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def _open(path, *, readonly=False):
+    """Open the file and apply the shared pragma profile."""
+    if readonly:
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10.0)
+    else:
+        conn = sqlite3.connect(path, timeout=10.0)
+    return apply_pragmas(conn, readonly=readonly)
 
 
 def _schema_state(db):

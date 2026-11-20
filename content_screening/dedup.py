@@ -29,9 +29,10 @@ CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT);
 def open_index(path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path)
+    from .db_access import apply_pragmas
+    db = sqlite3.connect(path, timeout=10.0)
     try:
-        db.execute("PRAGMA journal_mode=WAL")
+        apply_pragmas(db)
         db.execute(_MIGRATION)
         version = db.execute(
             "SELECT value FROM _meta WHERE key='schema_version'"

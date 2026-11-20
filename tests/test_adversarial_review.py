@@ -5,12 +5,12 @@ import json
 import unittest
 from pathlib import Path
 
-from festival_match.task_planner import compile_goal
-from festival_match.task_service import TaskService
-from festival_match.control_server import RuleStore
-from festival_match.task_contract import apply_patch, apply_scope, validate_execution, default_task
-from festival_match.rules_v2 import local_analyze, apply_decision, validate_result
-from festival_match.normalization import normalize
+from content_screening.task_planner import compile_goal
+from content_screening.task_service import TaskService
+from content_screening.control_server import RuleStore
+from content_screening.task_contract import apply_patch, apply_scope, validate_execution, default_task
+from content_screening.rules_v2 import local_analyze, apply_decision, validate_result
+from content_screening.normalization import normalize
 
 
 class AdversarialReviewTests(unittest.TestCase):

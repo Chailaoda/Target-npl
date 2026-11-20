@@ -34,6 +34,21 @@ def load_deployment(path=None):
     return data
 
 
+def _resolve_root(base_dir, raw):
+    """Resolve a declared root against the manifest directory.
+
+    deployment.json is meant to be portable: "." means "next to the manifest",
+    so a cloned or moved checkout keeps working without editing drive letters.
+    Absolute paths are still accepted for existing installations.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        raise RuntimeErrorBase("DEPLOYMENT_MISSING", "app_root/state_root is missing")
+    candidate = Path(raw.strip()).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path(base_dir) / candidate
+    return candidate.resolve()
+
+
 @dataclass(frozen=True)
 class RuntimeContext:
     deployment_path: Path
@@ -45,8 +60,9 @@ class RuntimeContext:
     def load(cls, path=None):
         deployment_path = Path(path or os.environ.get("TARGET_NPL_DEPLOYMENT", Path(__file__).resolve().parents[1] / "deployment.json")).resolve()
         data = load_deployment(deployment_path)
-        app_root = Path(data["app_root"]).resolve()
-        state_root = Path(data["state_root"]).resolve()
+        base_dir = deployment_path.parent
+        app_root = _resolve_root(base_dir, data["app_root"])
+        state_root = _resolve_root(base_dir, data["state_root"])
         if data.get("test_isolated"):
             return cls(deployment_path, app_root, state_root, data)
         if app_root != deployment_path.parent and not data.get("test_isolated"):

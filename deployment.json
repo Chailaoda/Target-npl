@@ -7,11 +7,10 @@
   "instance_id": "target-npl-production-8766",
   "host": "127.0.0.1",
   "port": 8766,
-  "app_root": "E:/workplace/Target-npl",
-  "state_root": "E:/workplace/Target-npl",
+  "app_root": ".",
+  "state_root": ".",
   "database": {
-    "relative_path": "data/festival.sqlite3",
-    "expected_source_sha256": "1eb43b46418ebaf72ba4bff96db666da4d150f865a841b1a4fb730c683874c54"
+    "relative_path": "data/festival.sqlite3"
   },
   "policy": {
     "allow_external_collection": true,

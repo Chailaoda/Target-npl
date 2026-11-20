@@ -36,9 +36,11 @@ def open_queue(path):
     """打开队列数据库并在事务中初始化表和索引。"""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    from .db_access import apply_pragmas
     db = sqlite3.connect(path, timeout=30)
     try:
         db.row_factory = sqlite3.Row
+        apply_pragmas(db)
         if db.execute("PRAGMA journal_mode=WAL").fetchone()[0] != "wal":
             raise sqlite3.OperationalError("队列数据库无法启用 WAL")
         with db:
