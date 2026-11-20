@@ -524,3 +524,28 @@ mark { background: color-mix(in srgb, var(--accent) 22%, transparent); color: in
   .toasts { left: 16px; right: 16px; bottom: 16px; }
   .toast { min-width: 0; max-width: none; }
 }
+
+/* ---------- WP6: review & attribution conflict workbench ---------- */
+.nav-badge { margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--danger); color: #fff; font-size: 11px; font-variant-numeric: tabular-nums; display: grid; place-items: center; }
+.review-page { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.review-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--text-3); }
+.review-bar small { flex: 1; min-width: 220px; }
+.review-tab { padding: 5px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text-2); cursor: pointer; font-variant-numeric: tabular-nums; }
+.review-tab.on { border-color: var(--accent-line); color: var(--text); background: var(--accent-soft); }
+.review-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.review-list, .conflict-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; max-height: 460px; overflow-y: auto; }
+.review-list li, .conflict-list li { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--panel-2); cursor: pointer; }
+.review-list li.active, .conflict-list li.active { border-color: var(--accent-line); box-shadow: inset 0 0 0 1px var(--accent-line); }
+.review-meta { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.review-list p, .conflict-list p { margin: 6px 0; font-size: 13px; line-height: 1.65; color: var(--text); overflow-wrap: anywhere; }
+.review-list small { color: var(--text-3); font-size: 12px; }
+.review-actions { display: flex; gap: 8px; margin-top: 14px; }
+.conflict-pair { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+@media (max-width: 1100px) { .review-grid { grid-template-columns: minmax(0, 1fr); } }
+
+/* ---------- WP6: pre-flight health & budget ---------- */
+.budget-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0 14px; font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.budget-label { color: var(--text-2); }
+.budget-track { position: relative; flex: 1; min-width: 120px; height: 6px; border-radius: 3px; background: var(--panel-3); overflow: hidden; }
+.budget-track i { position: absolute; inset: 0 auto 0 0; display: block; background: var(--accent); border-radius: 3px; }
+.budget-warn { color: var(--warn); }

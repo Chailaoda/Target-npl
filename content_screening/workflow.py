@@ -306,6 +306,54 @@ def review(db_path, key, decision, note):
 REVIEW_DECISIONS = {"accept": "confirm", "reject": "reject", "needs_review": "uncertain"}
 
 
+def pending_reviews(db_path, run_id=None, limit=50):
+    """Queue for the keyboard-driven review workbench.
+
+    Only rows the pipeline itself flagged as needs_review are listed: an
+    analyst cannot "review" content the run never offered, and accepted
+    candidates are not silently mixed into the queue.
+    """
+    if isinstance(limit, str) and limit.isdigit():
+        limit = int(limit)
+    if not isinstance(limit, int) or not 1 <= limit <= 200:
+        raise ValueError("复核队列数量应为 1–200 的整数")
+    if run_id is not None and (not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f]{32}", run_id)):
+        raise ValueError("run_id 无效")
+    query = """SELECT t.analysis_key,t.job_id,t.status,t.error_code,s.source_json,a.result_json
+        FROM v2_tasks t JOIN v2_sources s ON s.source_hash=t.source_hash
+        LEFT JOIN v2_analyses a ON a.analysis_key=t.analysis_key
+        WHERE t.status='needs_review'"""
+    params = []
+    if run_id:
+        query += " AND t.job_id=?"
+        params.append(run_id)
+    query += " ORDER BY t.analysis_key LIMIT ?"
+    params.append(limit)
+    with closing(connect(db_path, readonly=True)) as db:
+        rows = db.execute(query, params).fetchall()
+    items = []
+    for row in rows:
+        source = json.loads(row["source_json"])
+        result = json.loads(row["result_json"]) if row["result_json"] else {}
+        items.append({
+            "analysis_key": row["analysis_key"],
+            "run_id": row["job_id"],
+            "platform": source.get("platform", ""),
+            "object_type": source.get("object_type", ""),
+            "content_id": source.get("content_id", ""),
+            "text": str(source.get("text") or "")[:2000],
+            "url": source.get("url", ""),
+            "score": result.get("score", 0),
+            "stance": result.get("stance", "unclear"),
+            "intent": result.get("intent", "unclear"),
+            "reason": result.get("reason", ""),
+            "evidence": result.get("evidence", {}),
+            "status": row["status"],
+            "error_code": row["error_code"] or "",
+        })
+    return {"items": items, "total": len(items)}
+
+
 def review_many(db_path, items):
     """Batch human review for the workbench (accept / reject / needs_review).
 

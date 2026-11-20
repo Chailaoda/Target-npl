@@ -179,6 +179,13 @@ def make_server(port=8766,store=None,context=None):
                     return self.send(200,interests.search(query['topic'][0],**options))
                 if route=='/api/interests/analyze':
                     return self.send(200,interests.topic_status(query.get('topic',[''])[0]))
+                if route=='/api/reviews/pending':
+                    from .db_access import resolve_db
+                    from .workflow import pending_reviews
+                    return self.send(200,pending_reviews(
+                        resolve_db(context),
+                        run_id=query.get('run_id',[''])[0] or None,
+                        limit=query.get('limit',['50'])[0]))
                 if route=='/api/accounts/conflicts':
                     return self.send(200,interests.list_conflicts(
                         status=query.get('status',['pending'])[0],
@@ -199,8 +206,8 @@ def make_server(port=8766,store=None,context=None):
                         return self.send(200,interests.evidence(key,unquote(parts[5]),query.get('window',['all'])[0]))
                     return self.send(404,{'error':'人物接口不存在'})
                 if route=='/api/platforms':
-                    from .platforms import catalog
-                    return self.send(200,catalog(store.root))
+                    from .platforms import health
+                    return self.send(200,health(store.root))
                 if route=='/api/tasks/latest':
                     from .live_view import latest
                     return self.send(200,latest(tasks))

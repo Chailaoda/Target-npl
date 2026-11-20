@@ -280,7 +280,13 @@ class PlatformTests(unittest.TestCase):
         server=make_server(0,store);threading.Thread(target=server.serve_forever,daemon=True).start()
         self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
         base=f'http://127.0.0.1:{server.server_port}';opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(base+'/api/platforms') as response:self.assertEqual(len(json.load(response)),7)
+        with opener.open(base+'/api/platforms') as response:
+            body=json.load(response)
+            # WP6-T4: the catalog is now a pre-flight envelope, not a bare list.
+            self.assertEqual(set(body),{'platforms','budget','vendor_preflight'})
+            self.assertEqual(len(body['platforms']),7)
+            self.assertIn('last_status',body['platforms'][0])
+            self.assertIn('api_calls_limit',body['budget'])
         with opener.open(base+'/api/state') as response:token=json.load(response)['token']
         request=urllib.request.Request(base+'/api/platforms/open-login',data=b'{"platform":"xhs"}',headers={'Origin':base,'Content-Type':'application/json','X-Control-Token':token})
         with patch('content_screening.platforms.open_login',return_value={'status':'awaiting_manual_login'}) as open_window:
