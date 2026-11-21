@@ -5,21 +5,24 @@ import type { Api } from '../lib/apiClient'
 
 type LiveDelta = LiveData & {
   incremental?: boolean
-  next_seq?: number
+  next_seq?: string | number
   captured_delta?: LiveData['captured']
   candidates_delta?: LiveData['candidates']
 }
 
+const FEED_LIMIT = 400
+const CANDIDATE_LIMIT = 200
+
 const keyed = <T extends { id?: string }>(items: T[]) =>
   Array.from(new Map(items.map(item => [item.id, item])).values())
 
-function mergeLive(previous: LiveData | null, incoming: LiveDelta): LiveData {
-  if (!incoming.incremental || typeof incoming.next_seq !== 'number') return incoming
+export function mergeLive(previous: LiveData | null, incoming: LiveDelta): LiveData {
+  if (!incoming.incremental || incoming.next_seq === undefined) return incoming
   const base = previous && previous.run_id === incoming.run_id ? previous : null
   return {
     ...incoming,
-    captured: keyed([...(base?.captured || []), ...(incoming.captured_delta || [])]),
-    candidates: keyed([...(base?.candidates || []), ...(incoming.candidates_delta || [])])
+    captured: keyed([...(base?.captured || []), ...(incoming.captured_delta || [])]).slice(-FEED_LIMIT),
+    candidates: keyed([...(base?.candidates || []), ...(incoming.candidates_delta || [])]).slice(-CANDIDATE_LIMIT)
   }
 }
 
@@ -34,7 +37,7 @@ export function useRunStream(api: Api, enabled: boolean) {
   const [runState, setRunState] = useState<RunState | null>(null)
   const [liveData, setLiveData] = useState<LiveData | null>(null)
   const [liveError, setLiveError] = useState('')
-  const cursor = useRef(0)
+  const cursor = useRef<string | number>(0)
   const liveRunId = useRef<string | null>(null)
 
   useEffect(() => {
@@ -71,7 +74,9 @@ export function useRunStream(api: Api, enabled: boolean) {
         ])
         if (cancelled) return
         if (live) {
-          if (typeof live.next_seq === 'number') cursor.current = live.next_seq
+          if (typeof live.next_seq === 'string' || typeof live.next_seq === 'number') {
+            cursor.current = live.next_seq
+          }
           setLiveData(previous => mergeLive(previous, live))
         }
         if (status) setRunState(status)
@@ -84,6 +89,9 @@ export function useRunStream(api: Api, enabled: boolean) {
     }
 
     const schedule = () => {
+      // Terminal runs get their final snapshot and then stop. A completed run
+      // must not keep projecting the whole database every two seconds.
+      if (!running) return
       // visibilityState, not document.hidden: hidden is true in non-visual
       // DOM environments (tests) where the page is actually being observed.
       const delay = document.visibilityState === 'hidden' ? 6000 : 2000

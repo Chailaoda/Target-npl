@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 
 from content_screening.control_server import RuleStore
-from content_screening.live_view import live, SEQ_SCALE
+from content_screening.live_cursor import decode_cursor, encode_cursor
+from content_screening.live_view import live
 from content_screening.task_service import TaskService, atomic_json
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,13 +48,17 @@ class LiveIncrementalTests(unittest.TestCase):
         except OSError:
             pass
 
-    def append(self, start, count):
-        with self.raw.open("a", encoding="utf-8") as stream:
+    def append(self, start, count, path=None, platform=None):
+        target = path or self.raw
+        with target.open("a", encoding="utf-8") as stream:
             for index in range(start, start + count):
-                stream.write(json.dumps({
+                row = {
                     "object_type": "post",
                     "data": {"aweme_id": str(index), "desc": f"示例活动第 {index} 条公开内容，找搭子一起去"}
-                }, ensure_ascii=False) + "\n")
+                }
+                if platform:
+                    row["platform"] = platform
+                stream.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def test_delta_only_carries_new_rows(self):
         self.append(0, 500)
@@ -67,8 +72,7 @@ class LiveIncrementalTests(unittest.TestCase):
         self.assertTrue(delta["incremental"])
         self.assertEqual([row["id"] for row in delta["captured_delta"]],
                          [f"douyin:post:{index}" for index in (500, 501, 502)])
-        self.assertEqual(delta["captured_delta"], delta["captured_delta"])
-        self.assertGreater(delta["next_seq"], full["next_seq"])
+        self.assertNotEqual(delta["next_seq"], full["next_seq"])
         saved = len(json.dumps(full, ensure_ascii=False).encode()) / max(1, len(json.dumps(delta, ensure_ascii=False).encode()))
         self.assertGreater(saved, 5, "delta payload should be far smaller than the full payload")
 
@@ -83,8 +87,11 @@ class LiveIncrementalTests(unittest.TestCase):
     def test_cursor_from_the_future_and_negative_values_are_handled(self):
         self.append(0, 3)
         full = live(self.service, self.run_id)
-        ahead = live(self.service, self.run_id, since_seq=full["next_seq"] + SEQ_SCALE)
+        relative = self.raw.relative_to(self.root).as_posix()
+        ahead = live(self.service, self.run_id,
+                     since_seq=encode_cursor({relative: (1_000_000, 3)}, 0))
         self.assertFalse(ahead["incremental"])
+        self.assertEqual(ahead["captured_total"], 3)
         with self.assertRaises(ValueError):
             live(self.service, self.run_id, since_seq=-1)
         with self.assertRaises(ValueError):
@@ -93,8 +100,55 @@ class LiveIncrementalTests(unittest.TestCase):
     def test_candidates_get_their_own_channel_in_the_same_cursor(self):
         self.append(0, 2)
         full = live(self.service, self.run_id)
-        self.assertEqual(full["next_seq"] // SEQ_SCALE, full["captured_total"])
-        self.assertEqual(full["next_seq"] % SEQ_SCALE, full["candidate_total"])
+        sources, candidates = decode_cursor(full["next_seq"])
+        self.assertEqual(sum(rows for _, rows in sources.values()), full["captured_total"])
+        self.assertEqual(candidates, full["candidate_total"])
+
+    def test_earlier_lane_appending_does_not_hide_its_new_rows(self):
+        """Multiple raw files grow independently; a total-row cursor shifted."""
+        lane_a = self.root / "data/collections/20261120T000000000001Z"
+        lane_b = self.root / "data/collections/20261120T000000000002Z"
+        for platform, lane in (("douyin", lane_a), ("xhs", lane_b)):
+            lane.mkdir(parents=True)
+            atomic_json(self.folder / "platform-live" / platform / "collection-progress.json",
+                        {"dataset_id": lane.name})
+            (lane / "raw.jsonl").write_text("", encoding="utf-8")
+        atomic_json(self.source / "checkpoint.json", {
+            "status": "running", "aggregate": True,
+            "platform_statuses": [
+                {"platform": "douyin", "status": "completed"},
+                {"platform": "xhs", "status": "completed"},
+            ],
+        })
+        self.append(0, 2, lane_a / "raw.jsonl", "douyin")
+        self.append(0, 2, lane_b / "raw.jsonl", "xhs")
+        full = live(self.service, self.run_id)
+        self.assertEqual([row["id"] for row in full["captured"]],
+                         ["douyin:post:0", "douyin:post:1", "xhs:post:0", "xhs:post:1"])
+
+        self.append(2, 1, lane_a / "raw.jsonl", "douyin")
+        delta = live(self.service, self.run_id, since_seq=full["next_seq"])
+        self.assertTrue(delta["incremental"])
+        self.assertEqual([row["id"] for row in delta["captured_delta"]], ["douyin:post:2"])
+        self.assertEqual(delta["captured_total"], 5)
+
+    def test_trailing_partial_line_is_retried_and_truncation_resyncs(self):
+        self.raw.write_text('{"object_type":"post","data":{"aweme_id":"1","desc":"完整"}}\n'
+                            '{"object_type":"post","data":{"aweme_id":"2","desc":"',
+                            encoding="utf-8")
+        full = live(self.service, self.run_id)
+        self.assertEqual(full["captured_total"], 1)
+        with self.raw.open("a", encoding="utf-8") as stream:
+            stream.write('补全"}}\n')
+        delta = live(self.service, self.run_id, since_seq=full["next_seq"])
+        self.assertEqual([row["id"] for row in delta["captured_delta"]], ["douyin:post:2"])
+
+        # Replacing with a shorter file must invalidate the byte cursor.
+        self.raw.write_text('{"object_type":"post","data":{"aweme_id":"9","desc":"新文件"}}\n',
+                            encoding="utf-8")
+        reset = live(self.service, self.run_id, since_seq=delta["next_seq"])
+        self.assertFalse(reset["incremental"])
+        self.assertEqual([row["id"] for row in reset["captured"]], ["douyin:post:9"])
 
 
 if __name__ == "__main__":

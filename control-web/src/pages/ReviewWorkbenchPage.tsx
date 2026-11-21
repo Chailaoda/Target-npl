@@ -57,6 +57,7 @@ export default function ReviewWorkbenchPage({ api, notices }: Props) {
     setBusy(true)
     try {
       await api('/api/reviews', { items: [{ analysis_key: item.analysis_key, decision }] })
+      notices.notify(decision === 'accept' ? '已接受当前结论并归档' : '已驳回并移出候选')
     } catch (error) {
       setReviews(previous)
       notices.fail(`${(error as Error).message}（已回滚该条，请刷新后重试）`)
@@ -138,7 +139,7 @@ export default function ReviewWorkbenchPage({ api, notices }: Props) {
       </div>
 
       <div className="review-grid">
-        <Card title="待复核内容" desc="模型判定不确定或需要人看的条目；接受后进入候选结果。" aside={<ShieldQuestion size={15} />}>
+        <Card title="待复核内容" desc="模型判定不确定或需要人看的条目；接受会确认当前结论并归档，驳回会移出候选。" aside={<ShieldQuestion size={15} />}>
           {reviews.length === 0 ? (
             <div className="empty">队列已清空</div>
           ) : (

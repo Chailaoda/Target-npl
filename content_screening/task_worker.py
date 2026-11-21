@@ -30,6 +30,12 @@ def execute(run_id,root=None):
     try:
         for name in ('policy','collection','task'):atomic_json(folder/f'{name}.json',bundle[name])
         execution=bundle['task']['execution']
+        from .budget_controller import BudgetController
+        budget=BudgetController(root)
+        if execution['mode']=='ark' and budget.available_api_calls()<=0:
+            update(status='not_started_budget',phase='stopped',
+                   message='今日模型调用额度已用完，未启动采集；额度将在 UTC 次日重置。')
+            return state
         if execution['source']=='existing':source=service.dataset(execution['dataset_id'])
         else:
             update(phase='collecting')
@@ -74,7 +80,7 @@ def execute(run_id,root=None):
         from .workflow import run
         from .db_access import resolve_db
         result=run(source,folder/'policy.json',resolve_db(),Path(root)/'output/task-runs'/run_id,
-                   execution['mode'],Path(root)/'config/connection.json',execution['max_api_calls'],task=bundle['task'],config_revision=request['revision'],on_start=lambda job_id:update(analysis_job_id=job_id))
+                   execution['mode'],Path(root)/'config/connection.json',execution['max_api_calls'],task=bundle['task'],config_revision=request['revision'],on_start=lambda job_id:update(analysis_job_id=job_id),budget=budget)
         analysis_status=result['status']
         analysis_ok=analysis_status in ('completed','completed_empty','completed_with_review')
         # Collection / analysis / overall are three distinct states. An

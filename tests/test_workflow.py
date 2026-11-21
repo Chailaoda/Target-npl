@@ -180,10 +180,14 @@ class WorkflowTests(unittest.TestCase):
         with closing(connect(self.db)) as db:
             refreshed = export_job(db, result["job_id"], self.root / "refreshed")
             self.assertEqual(db.execute("SELECT count(*) FROM v2_review_history").fetchone()[0], 1)
+            stored = json.loads(db.execute(
+                "SELECT result_json FROM v2_analyses WHERE analysis_key=?", (key,)).fetchone()[0])
+        self.assertTrue(stored["accepted"], "human review must not rewrite the stored model result")
         records = [json.loads(l) for l in Path(refreshed["export"]).read_text(encoding="utf-8").splitlines()]
         row = next(r for r in records if r["analysis_key"] == key)
         self.assertEqual(row["review"]["decision"], "reject")
-        self.assertTrue(row["result"]["accepted"])
+        self.assertFalse(row["result"]["accepted"])
+        self.assertEqual(row["result"]["human_review"], "reject")
 
     def test_hostile_public_text_is_escaped_in_report(self):
         self.write([self.post('我喜欢示例活动<script>alert(1)</script>', author='<img onerror=alert(1)>')])

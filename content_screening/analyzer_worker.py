@@ -17,7 +17,7 @@ from .workflow import run as workflow_run
 
 logger = logging.getLogger("analyzer_worker")
 
-_DEFAULT_CONFIG = {"batch_size": 30, "max_calls": 500, "interval": 60, "worker_id": "auto"}
+_DEFAULT_CONFIG = {"batch_size": 30, "max_calls": 500, "interval": 60, "worker_id": "auto", "daily_api_calls": 2000}
 _COMPLETED = {"completed", "completed_with_review"}
 
 
@@ -121,6 +121,7 @@ class AnalyzerWorker:
                     budget=self.budget,
                 )
                 status = result.get("status")
+                api_calls = result.get("api_calls", 0)
                 if status in _COMPLETED:
                     done = list(hashes)
                 elif status == "partial":

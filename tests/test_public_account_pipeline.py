@@ -131,9 +131,10 @@ class PublicAccountPipelineTests(unittest.TestCase):
         self.assertEqual(self.service.accounts()["total"], 2)
     def test_receipt_path_is_anchored_to_project_after_vendor_chdir(self):
         import os
+        import uuid
         from scripts.mediacrawler_collect import publish_result
         previous = Path.cwd()
-        target = ROOT / "output/collections/public-account-trial-receipt-path-test.json"
+        target = ROOT / f"output/collections/public-account-trial-receipt-path-{uuid.uuid4().hex}.json"
         self.addCleanup(target.unlink, missing_ok=True)
         try:
             os.chdir(ROOT / "vendor/MediaCrawler-controlled")

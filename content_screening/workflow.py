@@ -4,8 +4,10 @@ from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from contextlib import closing
 from datetime import datetime, timezone
 import html
+import hashlib
 import json
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import sys
@@ -206,10 +208,12 @@ def run(input_path, policy_path, db_path, output, mode="rules", connection_path=
                 futures = {pool.submit(analyze_one, item): item for item in pending_items}
                 for future in as_completed(futures):
                     source_hash, record, key, context, missing = futures[future]
+                    charged = False
                     try:
                         result, was_called = future.result()
                         if was_called:
                             calls += 1
+                            charged = True
                         consecutive_errors = 0
                         tokens += result.get("usage", {}).get("total_tokens", 0)
                         # Each success is committed independently: interrupted
@@ -228,9 +232,15 @@ def run(input_path, policy_path, db_path, output, mode="rules", connection_path=
                         code = getattr(error, "validation_code", type(error).__name__)
                         usage = getattr(error, "usage", {})
                         tokens += usage.get("total_tokens", 0)
+                        # A failed validation still consumed a model request when
+                        # it ran in ark mode. Charge the attempt, not only successes.
+                        was_called = bool(mode == "ark" and record["text"].strip())
+                        if was_called and not charged:
+                            calls += 1
+                            charged = True
                         # Never store arbitrary exception bodies or model responses.
                         with db:
-                            db.execute("INSERT INTO v2_attempts(job_id,analysis_key,api_called,status,error_code,usage_json,created_at) VALUES (?,?,?,'failed',?,?,?)", (job_id, key, 0, code, json.dumps(usage), utcnow()))
+                            db.execute("INSERT INTO v2_attempts(job_id,analysis_key,api_called,status,error_code,usage_json,created_at) VALUES (?,?,?,'failed',?,?,?)", (job_id, key, int(was_called), code, json.dumps(usage), utcnow()))
                             db.execute("UPDATE v2_tasks SET status='failed',error_code=? WHERE job_id=? AND source_hash=?", (code, job_id, source_hash))
                             if getattr(error, "validation_code", None):
                                 save_abstention(db, job_id, source_hash, key, interpretation_hash, record, policy, context, missing, code)
@@ -238,6 +248,20 @@ def run(input_path, policy_path, db_path, output, mode="rules", connection_path=
                             # Systemic failure: stop launching queued work. The
                             # ones already in flight still land, so nothing is
                             # lost or double-counted.
+                            for pending in futures:
+                                pending.cancel()
+                    except Exception as error:  # noqa: BLE001 - isolate one bad record
+                        errors += 1
+                        consecutive_errors += 1
+                        code = type(error).__name__
+                        was_called = bool(mode == "ark" and record["text"].strip())
+                        if was_called and not charged:
+                            calls += 1
+                            charged = True
+                        with db:
+                            db.execute("INSERT INTO v2_attempts(job_id,analysis_key,api_called,status,error_code,usage_json,created_at) VALUES (?,?,?,'failed',?,?,?)", (job_id, key, int(was_called), code, '{}', utcnow()))
+                            db.execute("UPDATE v2_tasks SET status='failed',error_code=? WHERE job_id=? AND source_hash=?", (code, job_id, source_hash))
+                        if consecutive_errors >= 10:
                             for pending in futures:
                                 pending.cancel()
         finally:
@@ -262,6 +286,25 @@ def job_items(db, job_id):
              "result": json.loads(r["result_json"]) if r["result_json"] else None,'analysis_context':json.loads(r['context_json'] or '[]'), "review": {"decision": r["decision"], "note": r["note"]}} for r in rows]
 
 
+def _apply_human_review(result, decision):
+    """Project a human terminal decision without rewriting the stored model result.
+
+    Accepting confirms the machine conclusion as-is; it never fabricates positive
+    evidence for a quarantined output. Rejecting removes the row from candidates
+    and from the "related" bucket until a new analysis supersedes the review.
+    """
+    if not result or decision not in ("confirm", "reject"):
+        return result
+    projected = dict(result)
+    projected["quality_flags"] = list(result.get("quality_flags", []))
+    projected["human_review"] = "accept" if decision == "confirm" else "reject"
+    if decision == "reject":
+        projected.update(accepted=False, score=0, evidence_level="insufficient")
+        if "human_rejected" not in projected["quality_flags"]:
+            projected["quality_flags"].append("human_rejected")
+    return projected
+
+
 def projected_items(db, job, policy=None):
     items = job_items(db, job["job_id"])
     task=json.loads(job['task_json'] or 'null')
@@ -273,6 +316,9 @@ def projected_items(db, job, policy=None):
             if item["result"]:
                 item["result"] = apply_decision(item["result"], item["source"], policy)
                 item['result']=apply_scope(item['result'],item['source'],item['analysis_context'],task,job['created_at'])
+    for item in items:
+        if item["result"]:
+            item["result"] = _apply_human_review(item["result"], item["review"]["decision"])
     return items
 
 
@@ -289,7 +335,7 @@ def export_job(db, job_id, output, policy=None):
         group_key = (source["platform"], source["author_key"] or f"unknown:{source['object_type']}:{source['content_id']}")
         groups.setdefault(group_key, []).append(item)
     candidates = sum(bool(i["result"] and i["result"]["accepted"]) for i in items)
-    related = sum(bool(i["result"] and i["result"]["topic"] == "relevant" and not i["result"]["accepted"] and i["status"] != "needs_review" and i['result'].get('scope_check',{}).get('status') not in ('excluded','unknown')) for i in items)
+    related = sum(bool(i["result"] and i["result"]["topic"] == "relevant" and not i["result"]["accepted"] and i["status"] != "needs_review" and 'human_rejected' not in i["result"].get('quality_flags', []) and i['result'].get('scope_check',{}).get('status') not in ('excluded','unknown')) for i in items)
     candidate_groups = [g for g in groups.values() if any(i["result"] and i["result"]["accepted"] for i in g)]
     counts = {"candidate_public_accounts": sum(g[0]["source"]["identity_mode"] == "public_source" for g in candidate_groups),
               "candidate_anonymous_groups": sum(g[0]["source"]["identity_mode"] == "upstream_anonymized" for g in candidate_groups),
@@ -305,7 +351,7 @@ def export_job(db, job_id, output, policy=None):
     names = {"topic": "相关性", "stance": "态度", "intent": "意向", "promotion": "推广", "author_role": "作者角色"}
     values = {"relevant": "相关", "unrelated": "无关", "uncertain": "不确定", "positive": "正向", "negative": "负向", "neutral": "中性", "unclear": "未明确",
               "seeking_company": "寻找同行", "planning": "参加计划", "attended": "参与经历", "none": "未表达", "yes": "是", "no": "否", "individual": "个人自述", "organizer": "组织者自述", "unknown": "未知"}
-    states = {"candidate": "明确线索", "related": "相关弱线索", "needs_review": "待复核", "failed": "处理失败", "other": "其他内容",'excluded':'范围不符或排除','scope_unknown':'范围待核对'}
+    states = {"candidate": "明确线索", "related": "相关弱线索", "needs_review": "待复核", "failed": "处理失败", "rejected": "人工驳回", "other": "其他内容",'excluded':'范围不符或排除','scope_unknown':'范围待核对'}
     sections = []
     for group in sorted(groups.values(), key=lambda g: -max((i["result"] or {}).get("score", 0) for i in g)):
         first = group[0]["source"]
@@ -313,8 +359,8 @@ def export_job(db, job_id, output, policy=None):
         cards = []
         for item in sorted(group, key=lambda i: -(i["result"] or {}).get("score", 0)):
             source, result = item["source"], item["result"]
-            state = "needs_review" if item["status"] == "needs_review" else "failed" if not result else "candidate" if result["accepted"] else "related" if result["topic"] == "relevant" else "other"
-            if result and item['status']!='needs_review' and result.get('scope_check',{}).get('status') in ('excluded','unknown'):state='excluded' if result['scope_check']['status']=='excluded' else 'scope_unknown'
+            state = "rejected" if result and 'human_rejected' in result.get('quality_flags', []) else "needs_review" if item["status"] == "needs_review" else "failed" if not result else "candidate" if result["accepted"] else "related" if result["topic"] == "relevant" else "other"
+            if state!='rejected' and result and item['status']!='needs_review' and result.get('scope_check',{}).get('status') in ('excluded','unknown'):state='excluded' if result['scope_check']['status']=='excluded' else 'scope_unknown'
             dims = ' · '.join(f'{names[k]}：{values.get(result[k],esc(result[k]))}' for k in names) if result else "处理失败，不能算未命中"
             evidence = ''.join(f'<li>{names[d]}（{"上下文主题" if e.get("source_hash") else "本人原文"}）：{esc(e["quote"])} [{e["start"]}:{e["end"]}]' + (f' <a href="#source-{esc(e["source_hash"])}">查看上下文来源</a>' if e.get("source_hash") else '') + '</li>' for d, e in (result or {}).get("evidence", {}).items())
             # A07 fix: validate the source URL against the record's own platform,
@@ -326,8 +372,8 @@ def export_job(db, job_id, output, policy=None):
         sections.append(f'<section><h2>{esc(first["author"] or "未提供昵称")} · {label} · {len(group)} 条</h2>{"".join(cards)}</section>')
     synthetic = any(i["source"]["synthetic"] for i in items)
     notice = "含虚构样例，不能作为真实账号结果。" if synthetic else "公开内容分析线索，未确认身份或实际参加意愿。匿名分组不能算可定位账号或确认人数；同一人可能有多个账号。"
-    page = f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>公开兴趣线索工作台</title><style>body{{font:16px/1.7 system-ui;background:#f4f6f8;color:#20333b}}main{{max-width:1000px;margin:auto;padding:24px}}article{{background:white;border:1px solid #cfd9de;padding:18px;border-radius:10px;margin:12px 0}}.body,code{{white-space:pre-wrap;overflow-wrap:anywhere}}.notice{{background:#fff1c9;padding:16px}}button{{padding:8px 14px;margin:4px}}h2{{font-size:19px}}[hidden]{{display:none}}</style><main><h1>公开兴趣线索 · 多维分析</h1><p class="notice">{notice}</p><p>批次 {esc(job_id)} · 状态 {esc(job['status'])} · 内容 {len(items)} · 明确线索 {candidates} · 相关弱线索 {related} · 失败 {summary['failed_contents']}</p><p>候选公开账号 {counts['candidate_public_accounts']} · 候选匿名分组 {counts['candidate_anonymous_groups']} · 作者未知候选内容 {counts['candidate_unknown_author_contents']}。排序分不是概率。</p><p>模板哈希 {esc(job['policy_hash'])}</p><nav><button data-filter="all">全部</button><button data-filter="candidate">明确线索</button><button data-filter="related">相关弱线索</button><button data-filter="failed">处理失败</button></nav><p>此文件可筛选查看；复核决定通过本机 workflow review 命令保存，重新 export 后显示。</p>{''.join(sections)}</main><script>document.querySelectorAll('[data-filter]').forEach(b=>b.addEventListener('click',()=>{{document.querySelectorAll('article').forEach(a=>a.hidden=b.dataset.filter!=='all'&&a.dataset.state!==b.dataset.filter);document.querySelectorAll('section').forEach(s=>s.hidden=![...s.querySelectorAll('article')].some(a=>!a.hidden));}}));</script></html>'''
-    page = page.replace('</nav>', '<button data-filter="needs_review">待复核</button></nav>')
+    page = f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>公开兴趣线索工作台</title><style>body{{font:16px/1.7 system-ui;background:#f4f6f8;color:#20333b}}main{{max-width:1000px;margin:auto;padding:24px}}article{{background:white;border:1px solid #cfd9de;padding:18px;border-radius:10px;margin:12px 0}}.body,code{{white-space:pre-wrap;overflow-wrap:anywhere}}.notice{{background:#fff1c9;padding:16px}}button{{padding:8px 14px;margin:4px}}h2{{font-size:19px}}[hidden]{{display:none}}</style><main><h1>公开兴趣线索 · 多维分析</h1><p class="notice">{notice}</p><p>批次 {esc(job_id)} · 状态 {esc(job['status'])} · 内容 {len(items)} · 明确线索 {candidates} · 相关弱线索 {related} · 失败 {summary['failed_contents']}</p><p>候选公开账号 {counts['candidate_public_accounts']} · 候选匿名分组 {counts['candidate_anonymous_groups']} · 作者未知候选内容 {counts['candidate_unknown_author_contents']}。排序分不是概率。</p><p>模板哈希 {esc(job['policy_hash'])}</p><nav><button data-filter="all">全部</button><button data-filter="candidate">明确线索</button><button data-filter="related">相关弱线索</button><button data-filter="failed">处理失败</button></nav><p>此文件可筛选查看；复核决定可通过 Web 复核台或本机 workflow review 命令保存，重新 export 后显示。</p>{''.join(sections)}</main><script>document.querySelectorAll('[data-filter]').forEach(b=>b.addEventListener('click',()=>{{document.querySelectorAll('article').forEach(a=>a.hidden=b.dataset.filter!=='all'&&a.dataset.state!==b.dataset.filter);document.querySelectorAll('section').forEach(s=>s.hidden=![...s.querySelectorAll('article')].some(a=>!a.hidden));}}));</script></html>'''
+    page = page.replace('</nav>', '<button data-filter="needs_review">待复核</button><button data-filter="rejected">人工驳回</button></nav>')
     if task:
         page=page.replace('</nav>','<button data-filter="excluded">范围不符或排除</button><button data-filter="scope_unknown">范围待核对</button></nav>')
         page=page.replace('<nav>',f'<p>任务目标：{esc(task["description"])} · 配置版本：{esc(job["config_revision"] or "显式文件")}。地域和时间条件为后处理检查，未宣称平台原生过滤。</p><nav>')
@@ -336,6 +382,31 @@ def export_job(db, job_id, output, policy=None):
     report.write_text(page, encoding="utf-8")
     summary.update(report=str(report.resolve()), export=str(export.resolve()))
     return summary
+
+
+def _settle_review_tasks(db, reviewed):
+    """Move reviewed tasks to their durable queue state.
+
+    confirm/reject are terminal; uncertain deliberately keeps (or returns) the
+    row to the pending queue. Job status is recomputed so a batch does not
+    remain 'completed_with_review' forever after its last item was handled.
+    """
+    jobs = set()
+    for key, decision in reviewed:
+        jobs.update(row[0] for row in db.execute(
+            "SELECT DISTINCT job_id FROM v2_tasks WHERE analysis_key=?", (key,)))
+        if decision == "uncertain":
+            db.execute("""UPDATE v2_tasks SET status='needs_review',error_code=NULL
+                WHERE analysis_key=? AND status='completed'""", (key,))
+        else:
+            db.execute("""UPDATE v2_tasks SET status='completed',error_code=NULL
+                WHERE analysis_key=? AND status='needs_review'""", (key,))
+    for job_id in jobs:
+        pending = db.execute("SELECT count(*) FROM v2_tasks WHERE job_id=? AND status='needs_review'",
+                             (job_id,)).fetchone()[0]
+        db.execute("""UPDATE v2_jobs SET status=?
+            WHERE job_id=? AND status IN ('completed','completed_with_review')""",
+                   ("completed_with_review" if pending else "completed", job_id))
 
 
 def review(db_path, key, decision, note):
@@ -347,6 +418,7 @@ def review(db_path, key, decision, note):
         values = (key, decision, note, utcnow())
         db.execute("INSERT OR REPLACE INTO v2_reviews VALUES (?,?,?,?)", values)
         db.execute("INSERT INTO v2_review_history(analysis_key,decision,note,updated_at) VALUES (?,?,?,?)", values)
+        _settle_review_tasks(db, [(key, decision)])
     return {"review_saved": True, "analysis_key": key, "decision": decision}
 
 
@@ -366,10 +438,12 @@ def pending_reviews(db_path, run_id=None, limit=50):
         raise ValueError("复核队列数量应为 1–200 的整数")
     if run_id is not None and (not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f]{32}", run_id)):
         raise ValueError("run_id 无效")
-    query = """SELECT t.analysis_key,t.job_id,t.status,t.error_code,s.source_json,a.result_json
+    query = """SELECT t.analysis_key,t.job_id,t.status,t.error_code,s.source_json,a.result_json,r.decision
         FROM v2_tasks t JOIN v2_sources s ON s.source_hash=t.source_hash
         LEFT JOIN v2_analyses a ON a.analysis_key=t.analysis_key
-        WHERE t.status='needs_review'"""
+        LEFT JOIN v2_reviews r ON r.analysis_key=t.analysis_key
+        WHERE t.status='needs_review'
+          AND (r.decision IS NULL OR r.decision='uncertain')"""
     params = []
     if run_id:
         query += " AND t.job_id=?"
@@ -435,11 +509,15 @@ def review_many(db_path, items):
         if missing:
             raise ValueError(f"分析记录不存在：{missing[0][:12]}")
         results = []
+        reviewed = []
         for key, decision, note in normalized:
-            values = (key, REVIEW_DECISIONS[decision], note, now)
+            stored = REVIEW_DECISIONS[decision]
+            values = (key, stored, note, now)
             db.execute("INSERT OR REPLACE INTO v2_reviews VALUES (?,?,?,?)", values)
             db.execute("INSERT INTO v2_review_history(analysis_key,decision,note,updated_at) VALUES (?,?,?,?)", values)
+            reviewed.append((key, stored))
             results.append({"analysis_key": key, "decision": decision, "updated_at": now})
+        _settle_review_tasks(db, reviewed)
     return {"updated": len(results), "results": results}
 
 
@@ -473,13 +551,14 @@ def main():
     ex.add_argument("--db", default=None)
     ex.add_argument("--output", default="output/workflow")
     args = parser.parse_args()
-    runtime_task=None;config_revision=None
+    runtime_task=None;config_revision=None;runtime_budget=None
     try:
         if args.command in ('run','collect-run'):
             from .runtime_context import current_context,set_context
             context=current_context();set_context(context)
             ROOT=context.state_root
             from .db_access import resolve_db
+            from .budget_controller import BudgetController
             if args.command=='run':args.db=args.db or str(resolve_db(context))
             if args.command=='collect-run':args.db=str(resolve_db(context))
             if args.command=='export':args.db=args.db or str(resolve_db(context))
@@ -496,6 +575,9 @@ def main():
             args.max_api_calls=args.max_api_calls if args.max_api_calls is not None else runtime_task['execution']['max_api_calls'] if runtime_task else 40
             if runtime_task:
                 runtime_task['execution'].update(mode=args.mode,max_api_calls=args.max_api_calls,source='collect' if args.command=='collect-run' else 'existing')
+            runtime_budget=BudgetController(ROOT)
+            if args.mode=='ark' and runtime_budget.available_api_calls()<=0:
+                raise ValueError('今日模型调用额度已用完；未采集、未调用模型')
         if args.command == "review":
             result = review(args.db, args.analysis_key, args.decision, args.note)
         elif args.command == "export":
@@ -516,9 +598,9 @@ def main():
                 monitor=ROOT/'data/task-runs'/uuid.uuid4().hex;monitor.mkdir(parents=True)
                 receipt=collect_selected(settings,monitor,ROOT)
                 if receipt['status'] not in ('completed','completed_empty'):raise ValueError('采集未完整完成；保留各平台检查点，请完成登录或排查失败，不自动分析部分批次')
-            result = run(receipt["raw_file"], args.policy, args.db, ROOT / "output/workflow", args.mode, ROOT / "config/connection.json", args.max_api_calls,task=runtime_task,config_revision=config_revision)
+            result = run(receipt["raw_file"], args.policy, args.db, ROOT / "output/workflow", args.mode, ROOT / "config/connection.json", args.max_api_calls,task=runtime_task,config_revision=config_revision,budget=runtime_budget)
         else:
-            result = run(args.input, args.policy, args.db, args.output, args.mode, args.connection, args.max_api_calls, job_id=args.resume_job,task=runtime_task,config_revision=config_revision)
+            result = run(args.input, args.policy, args.db, args.output, args.mode, args.connection, args.max_api_calls, job_id=args.resume_job,task=runtime_task,config_revision=config_revision,budget=runtime_budget)
     except (ValueError, OSError, sqlite3.Error, subprocess.TimeoutExpired) as error:
         print(f"流水线失败：{error}", file=sys.stderr)
         return 1

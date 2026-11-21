@@ -5,6 +5,9 @@ description = "Local, evidence-linked filtering of public sample topic content"
 requires-python = ">=3.12"
 dependencies = []
 
+[project.optional-dependencies]
+dev = ["ruff>=0.8,<1"]
+
 [tool.uv]
 package = false
 

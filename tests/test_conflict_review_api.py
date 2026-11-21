@@ -123,8 +123,18 @@ class ConflictReviewApiTests(unittest.TestCase):
         with sqlite3.connect(self.db_path) as db:
             return db.execute("SELECT analysis_key FROM v2_analyses LIMIT 1").fetchone()[0]
 
+    def mark_pending(self, key):
+        with sqlite3.connect(self.db_path) as db:
+            db.execute("UPDATE v2_tasks SET status='needs_review' WHERE analysis_key=?", (key,))
+
+    def task_state(self, key):
+        with sqlite3.connect(self.db_path) as db:
+            return db.execute("SELECT status FROM v2_tasks WHERE analysis_key=?", (key,)).fetchone()[0]
+
     def test_review_batch_writes_decisions_and_rejects_unknown_keys(self):
         key = self.analysis_key()
+        self.mark_pending(key)
+        self.assertEqual(self.get("/api/reviews/pending")["total"], 1)
         body = self.post("/api/reviews", {"items": [{"analysis_key": key, "decision": "accept", "note": "确认"}]})
         self.assertEqual(body["updated"], 1)
         self.assertEqual(body["results"][0]["decision"], "accept")
@@ -132,12 +142,39 @@ class ConflictReviewApiTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT decision FROM v2_reviews WHERE analysis_key=?", (key,)).fetchone()[0], "confirm")
             history = db.execute("SELECT count(*) FROM v2_review_history WHERE analysis_key=?", (key,)).fetchone()[0]
         self.assertEqual(history, 1)
+        self.assertEqual(self.task_state(key), "completed")
+        self.assertEqual(self.get("/api/reviews/pending")["total"], 0)
 
         with self.assertRaises(urllib.error.HTTPError) as caught:
             self.post("/api/reviews", {"items": [{"analysis_key": "f" * 64, "decision": "accept"}]})
         self.assertEqual(caught.exception.code, 400)
         with sqlite3.connect(self.db_path) as db:
             self.assertEqual(db.execute("SELECT count(*) FROM v2_review_history").fetchone()[0], history)
+
+    def test_needs_review_decision_keeps_item_queued(self):
+        key = self.analysis_key()
+        self.mark_pending(key)
+        self.post("/api/reviews", {"items": [{"analysis_key": key, "decision": "needs_review"}]})
+        self.assertEqual(self.task_state(key), "needs_review")
+        self.assertEqual(self.get("/api/reviews/pending")["total"], 1)
+        with sqlite3.connect(self.db_path) as db:
+            job_id = db.execute("SELECT job_id FROM v2_tasks WHERE analysis_key=?", (key,)).fetchone()[0]
+        filtered = self.get(f"/api/reviews/pending?run_id={job_id}")
+        self.assertEqual(filtered["total"], 1)
+
+    def test_reject_projection_removes_candidate_without_rewriting_analysis(self):
+        from content_screening.workflow import projected_items
+        key = self.analysis_key()
+        self.mark_pending(key)
+        self.post("/api/reviews", {"items": [{"analysis_key": key, "decision": "reject", "note": "证据不足"}]})
+        self.assertEqual(self.task_state(key), "completed")
+        with sqlite3.connect(self.db_path) as db:
+            db.row_factory = sqlite3.Row
+            job = db.execute("SELECT * FROM v2_jobs LIMIT 1").fetchone()
+            item = next(row for row in projected_items(db, job) if row["analysis_key"] == key)
+        self.assertFalse(item["result"]["accepted"])
+        self.assertEqual(item["result"]["human_review"], "reject")
+        self.assertIn("human_rejected", item["result"]["quality_flags"])
 
     def test_review_rejects_invalid_decision_and_shape(self):
         key = self.analysis_key()

@@ -35,10 +35,11 @@ python -m venv .venv
 .\.venv\Scripts\python.exe scripts/init_local.py
 npm --prefix control-web ci
 npm --prefix control-web run build
+.\.venv\Scripts\python.exe -X utf8 scripts/build_release.py
 .\.venv\Scripts\python.exe -X utf8 scripts/start_control.py --open
 ```
 
-`init_local.py` 只创建缺失配置，不覆盖已有文件。生成的 `config/`、`profiles/`、`deployment.json` 均被 Git 忽略；`deployment.json` 用 `app_root`/`state_root` = `"."` 指向仓库自身，因此整个目录可以复制到任意盘符或另一台机器，重建发布摘要后即可通过预检。示例关键词“示例活动”仅用于离线测试，请在本机修改后再执行采集。
+`init_local.py` 只创建缺失配置，不覆盖已有文件；首次运行还会显式创建一个已迁移的空数据库，之后运行改为保留现有库。运行时的预检仍然失败关闭，不会自动发明缺失或损坏的业务库。`config/`、`profiles/` 在生成后由 Git 忽略；`deployment.json` 是本仓库提供的可移植清单，`app_root`/`state_root` = `"."` 指向仓库自身。复制到任意盘符或另一台机器后，需重跑 `npm run build` 和 `scripts/build_release.py`，再执行预检。示例关键词“示例活动”仅用于离线测试，请在本机修改后再执行采集。
 
 Web 服务仅监听本机。任务会保存不可变版本；人工锁定字段、ETag 冲突检测、采集额度与模型调用额度仍由代码校验。地点和时间条件是内容证据的后处理，不是平台原生搜索过滤。
 
@@ -113,7 +114,10 @@ MCP 服务入口为 `scripts/task_mcp.py`；客户端示例位于 `examples/mcp-
 node --test tests/test_douyin_dom.cjs
 npm --prefix control-web test
 npm --prefix control-web run build
+uvx ruff check content_screening scripts tests
 ```
+
+`uvx ruff` 使用 `pyproject.toml` 中声明的语法/未定义名称门禁（E9、F63、F7、F82）。它不是运行时依赖，但合并前必须执行；本次复核发现的 `NameError` 正属于 F82 的拦截范围。
 
 `tests/vendor_platform_offline.py` 是需要独立 MediaCrawler 环境的可选适配检查，不在默认 unittest 发现范围内。离线测试不证明各平台在线采集或模型服务可用。
 

@@ -53,13 +53,14 @@ function setup({ failReview = false } = {}) {
     throw Error('Unexpected ' + url)
   }
   const failures = []
+  const notices = []
   render(React.createElement(ReviewWorkbenchPage, { api: async (p, b) => {
     const response = await fetch(p, b ? { method: 'POST', body: JSON.stringify(b) } : {})
     const data = await response.json()
     if (!response.ok) throw Error(data.error)
     return data
-  }, notices: { notify: () => {}, fail: text => failures.push(text) } }))
-  return { calls, failures }
+  }, notices: { notify: text => notices.push(text), fail: text => failures.push(text) } }))
+  return { calls, failures, notices }
 }
 
 const press = key => fireEvent.keyDown(window, { key })

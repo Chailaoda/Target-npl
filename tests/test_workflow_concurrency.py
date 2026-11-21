@@ -1,5 +1,6 @@
 """Bounded concurrent analysis with a single ordered writer (WP7-T1)."""
 import json
+import sqlite3
 import threading
 import time
 import unittest
@@ -120,6 +121,45 @@ class WorkflowConcurrencyTests(unittest.TestCase):
         self.assertEqual(result["api_calls"], 5)
         self.assertEqual(budget.status()["api_calls"]["used"], 5)
         self.assertGreater(result["candidate_contents"], 0)
+
+    def test_failed_model_calls_remain_charged(self):
+        self.write(4)
+        budget = BudgetController(self.root, {"daily_api_calls": 4, "daily_collection_posts": 500})
+
+        def always_fails(record, context):
+            raise OSError("simulated upstream failure after the request was sent")
+
+        result = self.run_with(always_fails, max_calls=4, budget=budget)
+        self.assertEqual(result["api_calls"], 4)
+        self.assertEqual(budget.status()["api_calls"]["used"], 4)
+        with sqlite3.connect(self.db) as db:
+            attempts = db.execute("SELECT api_called FROM v2_attempts WHERE status='failed'").fetchall()
+        self.assertEqual(attempts, [(1,), (1,), (1,), (1,)])
+
+    def test_budget_updates_share_one_lock(self):
+        budget = BudgetController(self.root, {"daily_api_calls": 10_000, "daily_collection_posts": 10_000})
+        workers = 6
+        operations = 20
+        errors = []
+
+        def work():
+            try:
+                for _ in range(operations):
+                    budget.reserve_api_calls(1)
+                    budget.record_tick([("douyin", 1)])
+            except Exception as error:  # pragma: no cover - surfaced below
+                errors.append(error)
+
+        threads = [threading.Thread(target=work) for _ in range(workers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+        status = budget.status()
+        self.assertEqual(status["api_calls"]["used"], workers * operations)
+        self.assertEqual(status["collection_posts"]["used"], workers * operations)
+        self.assertEqual(status["rounds"], workers * operations)
 
 
 if __name__ == "__main__":

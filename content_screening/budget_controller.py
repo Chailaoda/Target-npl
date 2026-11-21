@@ -45,37 +45,46 @@ class BudgetController:
 
     @contextmanager
     def _exclusive(self):
-        """Short cross-process lock so reserve/release are not interleaved.
+        """Short cross-process lock so all read-modify-write updates serialize.
 
-        The budget file is read-modify-write JSON shared by the orchestrator and
-        the analyzer worker, so two processes can otherwise both see the same
-        remaining balance. A stale lock (crashed process) is ignored after 30s.
+        The lock file is persistent and the OS owns the byte lock: a crashed
+        process releases it automatically. Creating/unlinking a lock file per
+        call races on Windows (a waiter can delete the new owner's file), so the
+        handle itself is the authority here.
         """
         lock = self._budget_dir / "budget.lock"
-        deadline = time.monotonic() + 5
-        handle = None
-        while True:
-            try:
-                handle = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                break
-            except FileExistsError:
-                try:
-                    if time.time() - lock.stat().st_mtime > 30:
-                        lock.unlink(missing_ok=True)
-                        continue
-                except OSError:
-                    pass
-                if time.monotonic() >= deadline:
-                    raise
-                time.sleep(0.02)
+        stream = lock.open("a+b")
         try:
-            yield
-        finally:
-            os.close(handle)
+            if stream.tell() == 0:
+                stream.write(b"0")
+                stream.flush()
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    stream.seek(0)
+                    if os.name == "nt":
+                        import msvcrt
+                        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.02)
             try:
-                lock.unlink()
-            except OSError:
-                pass
+                yield
+            finally:
+                stream.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        finally:
+            stream.close()
 
     def _load(self):
         today = _utctoday()
@@ -155,35 +164,38 @@ class BudgetController:
                    - data["collection_posts"])
 
     def record_collection(self, platform, new_posts):
-        """记录平台采集消耗。"""
+        """记录平台采集消耗（与分析预留共享同一把锁）。"""
         if new_posts <= 0:
             return
-        data = self._load()
-        data["collection_posts"] += new_posts
-        bp = data.setdefault("by_platform", {})
-        bp[platform] = bp.get(platform, 0) + new_posts
-        self._save(data)
+        with self._exclusive():
+            data = self._load()
+            data["collection_posts"] += new_posts
+            bp = data.setdefault("by_platform", {})
+            bp[platform] = bp.get(platform, 0) + new_posts
+            self._save(data)
 
     def record_round(self):
         """记录完成的编排轮次。"""
-        data = self._load()
-        data["rounds"] += 1
-        self._save(data)
+        with self._exclusive():
+            data = self._load()
+            data["rounds"] += 1
+            self._save(data)
 
     def record_tick(self, collections, round_increment=1):
         """批量记录一轮编排的所有采集消耗和轮次增量，单次磁盘写入。
 
         collections: list of (platform, new_posts) tuples
         """
-        data = self._load()
-        for platform, new_posts in collections:
-            if new_posts <= 0:
-                continue
-            data["collection_posts"] += new_posts
-            bp = data.setdefault("by_platform", {})
-            bp[platform] = bp.get(platform, 0) + new_posts
-        data["rounds"] += round_increment
-        self._save(data)
+        with self._exclusive():
+            data = self._load()
+            for platform, new_posts in collections:
+                if new_posts <= 0:
+                    continue
+                data["collection_posts"] += new_posts
+                bp = data.setdefault("by_platform", {})
+                bp[platform] = bp.get(platform, 0) + new_posts
+            data["rounds"] += round_increment
+            self._save(data)
 
     def status(self):
         """返回当日预算使用摘要。"""

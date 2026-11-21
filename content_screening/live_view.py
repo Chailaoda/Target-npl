@@ -1,8 +1,12 @@
 """Bounded, read-only run monitor. Uses committed analysis and original records."""
 import json
+from collections import OrderedDict
+from pathlib import Path
 import re
-from collections import deque
 from contextlib import closing
+import threading
+
+from .live_cursor import CursorStale, decode_cursor, encode_cursor, read_source
 
 
 def _person_key(candidate):
@@ -68,7 +72,70 @@ def latest(service):
     return service.status(state['run_id'])
 
 
-SEQ_SCALE = 1_000_000
+_PROJECTION_CACHE = OrderedDict()
+_PROJECTION_LOCK = threading.RLock()
+_PROJECTION_SIZE = 8
+
+
+def _projection_signature(db, job_id):
+    """Cheap change token covering task states, analyses and human reviews."""
+    statuses = tuple(sorted((row[0], row[1]) for row in db.execute(
+        "SELECT status,count(*) FROM v2_tasks WHERE job_id=? GROUP BY status", (job_id,))))
+    analyses = db.execute("""SELECT count(*),COALESCE(max(a.rowid),0) FROM v2_analyses a
+        JOIN v2_tasks t ON t.analysis_key=a.analysis_key WHERE t.job_id=?""", (job_id,)).fetchone()
+    reviews = tuple(sorted((row[0], row[1], row[2]) for row in db.execute("""SELECT r.decision,count(*),COALESCE(max(r.updated_at),'')
+        FROM v2_reviews r JOIN v2_tasks t ON t.analysis_key=r.analysis_key
+        WHERE t.job_id=? GROUP BY r.decision""", (job_id,))))
+    return statuses, tuple(analyses), reviews
+
+
+def _projected_job_items(db_path, db, job):
+    """Reuse the full projection until task/analysis/review state changes.
+
+    The live endpoint polls every two seconds. Re-projecting hundreds of stored
+    analyses on every poll made the "incremental" transport a network-only win.
+    The signature queries are indexed and tiny; the expensive Python projection
+    only runs when something actually changed.
+    """
+    from .workflow import projected_items
+    signature = _projection_signature(db, job["job_id"])
+    key = (str(db_path), job["job_id"])
+    with _PROJECTION_LOCK:
+        cached = _PROJECTION_CACHE.get(key)
+        if cached and cached[0] == signature:
+            _PROJECTION_CACHE.move_to_end(key)
+            return cached[1]
+    items = projected_items(db, job)
+    with _PROJECTION_LOCK:
+        _PROJECTION_CACHE[key] = (signature, items)
+        _PROJECTION_CACHE.move_to_end(key)
+        while len(_PROJECTION_CACHE) > _PROJECTION_SIZE:
+            _PROJECTION_CACHE.popitem(last=False)
+    return items
+
+
+def _capture_row(row):
+    """Convert one stored export row into the bounded public live item."""
+    item=row.get('data',row)
+    kind=row.get('object_type','post')
+    platform=row.get('platform','douyin')
+    cid=item.get('comment_id',item.get('content_id','')) if kind=='comment' else item.get('aweme_id',item.get('content_id',''))
+    text=item.get('content',item.get('text','')) if kind=='comment' else item.get('desc',item.get('title',item.get('text','')))
+    published=item.get('published_at') or item.get('create_time') or ''
+    if isinstance(published,(int,float)) or str(published).isdigit():
+        from .platform_projection import timestamp
+        published=timestamp(published)
+    return {'id':f'{platform}:{kind}:{cid}','platform':platform,'kind':kind,
+            'text':str(text or '')[:2000],'keyword':row.get('keyword',''),
+            'published_at':str(published or '')}
+
+
+def _source_key(raw, root):
+    """Stable cursor identity without exposing an absolute local path."""
+    try:
+        return Path(raw).resolve().relative_to(Path(root).resolve()).as_posix()
+    except ValueError as error:
+        raise ValueError("采集来源不在当前工作区内") from error
 
 
 def live(service,run_id,since_seq=None):
@@ -77,8 +144,16 @@ def live(service,run_id,since_seq=None):
     dataset=state.get('dataset_id')
     pointer=folder/'collection-progress.json'
     if not dataset and pointer.exists():dataset=json.loads(pointer.read_text(encoding='utf-8')).get('dataset_id')
-    captured=deque(maxlen=200);captured_total=0;collection={}
+    collection={}
     sources=[]
+    if since_seq is None:
+        cursor_data=None
+    elif isinstance(since_seq,int) and not isinstance(since_seq,bool):
+        if since_seq<0:
+            raise ValueError('since_seq 必须是非负整数或有效游标')
+        cursor_data=None  # Legacy numeric clients get one safe full snapshot.
+    else:
+        cursor_data=decode_cursor(since_seq)
     if dataset and re.fullmatch(r'\d{8}T\d{12}Z',dataset):
         source=service.root/'data/collections'/dataset
         checkpoint=source/'checkpoint.json'
@@ -134,32 +209,48 @@ def live(service,run_id,since_seq=None):
             if details:
                 collection['platform_statuses']=details;collection['requests']=sum(p.get('requests',0) for p in details)
         if not sources:sources=[source/'raw.jsonl']
-    for raw in sources:
-        if not raw.exists():continue
-        # A trailing incomplete append is not a record until the next poll.
-        for line in raw.read_text(encoding='utf-8').splitlines():
-            try:row=json.loads(line)
-            except ValueError:continue
-            captured_total+=1
-            item=row.get('data',row);kind=row.get('object_type','post');platform=row.get('platform','douyin')
-            cid=item.get('comment_id',item.get('content_id','')) if kind=='comment' else item.get('aweme_id',item.get('content_id',''))
-            text=item.get('content',item.get('text','')) if kind=='comment' else item.get('desc',item.get('title',item.get('text','')))
-            published=item.get('published_at') or item.get('create_time') or ''
-            if isinstance(published,(int,float)) or str(published).isdigit():
-                from .platform_projection import timestamp
-                published=timestamp(published)
-            captured.append({'id':f'{platform}:{kind}:{cid}','platform':platform,'kind':kind,'text':str(text or '')[:2000],'keyword':row.get('keyword',''),'published_at':str(published or '')})
+    source_paths=list(dict.fromkeys(Path(raw) for raw in sources if Path(raw).exists()))
+    cursor_sources,previous_candidates=cursor_data if cursor_data else ({},0)
+    incremental=cursor_data is not None
+    current_keys={_source_key(raw,service.root) for raw in source_paths}
+    if incremental and set(cursor_sources)-current_keys:
+        # A lane/source disappeared (parent batch replaced child previews).
+        incremental=False
+
+    def read_all():
+        all_rows=[];states={}
+        for raw in source_paths:
+            key=_source_key(raw,service.root)
+            end,new_rows=read_source(raw,None,_capture_row)
+            states[key]=[end,len(new_rows)]
+            all_rows.extend(new_rows)
+        return states,all_rows
+
+    captured_rows=[];source_states={}
+    if incremental:
+        for raw in source_paths:
+            key=_source_key(raw,service.root)
+            previous=cursor_sources.get(key)
+            try:
+                end,new_rows=read_source(raw,previous[0] if previous else None,_capture_row)
+            except CursorStale:
+                incremental=False
+                break
+            source_states[key]=[end,(previous[1] if previous else 0)+len(new_rows)]
+            captured_rows.extend(new_rows)
+    if not incremental:
+        source_states,captured_rows=read_all()
+    captured_total=sum(count for _,count in source_states.values())
     job_id=state.get('analysis_job_id') or state.get('result',{}).get('job_id')
     candidates=[];processed=0;review=0
     db_path=_find_job_db(service.root,job_id) if job_id else None
     if db_path:
         import sqlite3
-        from .workflow import projected_items
         with closing(sqlite3.connect(db_path.resolve().as_uri()+'?mode=ro',uri=True,timeout=2)) as db:
             db.row_factory=sqlite3.Row
             job=db.execute('SELECT * FROM v2_jobs WHERE job_id=?',(job_id,)).fetchone()
             if job:
-                for item in projected_items(db,job):
+                for item in _projected_job_items(db_path,db,job):
                     processed+=item['status'] in ('completed','needs_review','failed')
                     review+=item['status']=='needs_review'
                     result=item['result'] or {}
@@ -192,36 +283,23 @@ def live(service,run_id,since_seq=None):
     person_potential = person_potential - person_exact
     exact_count = len(person_exact)
     potential_count = len(person_potential)
-    rows=list(captured)
     total_candidates=len(candidates)
-    # One cursor for two streams: high digits = rows read from the raw files,
-    # low digits = accepted candidates. Both only ever move forward, so a
-    # client can ask for "everything after N" without extra server state.
-    seq=captured_total*SEQ_SCALE+total_candidates
+    if incremental and previous_candidates>total_candidates:
+        # Candidate state rolled back (a job/source was replaced): resend all.
+        incremental=False
+        source_states,captured_rows=read_all()
+        captured_total=sum(count for _,count in source_states.values())
+    next_seq=encode_cursor(source_states,total_candidates)
     full={'run_id':run_id,'status':state['status'],'phase':state.get('phase'),
-        'collection':collection,'captured':rows,'captured_total':captured_total,
+        'collection':collection,'captured':captured_rows[-200:],'captured_total':captured_total,
         'candidates':candidates[-200:],'candidate_total':total_candidates,'exact_count':exact_count,'potential_count':potential_count,'processed':processed,'needs_review':review,
         'report_url':f'/reports/{run_id}' if state.get('result',{}).get('report') else None,
-        'next_seq':seq,'incremental':False}
-    if since_seq is None:
-        return full
-    try:
-        since=int(since_seq)
-    except (TypeError,ValueError) as error:
-        raise ValueError('since_seq 必须是非负整数') from error
-    if since<0:
-        raise ValueError('since_seq 必须是非负整数')
-    if since>seq:
-        return full
-    previous_rows,previous_candidates=divmod(since,SEQ_SCALE)
-    offset=max(0,captured_total-len(rows))
-    if previous_rows<offset or previous_candidates>total_candidates:
-        # The requested slice has already scrolled out of the bounded window:
-        # resync with a full payload instead of silently skipping records.
+        'next_seq':next_seq,'incremental':False}
+    if not incremental:
         return full
     return {'run_id':run_id,'status':state['status'],'phase':state.get('phase'),
-        'collection':collection,'incremental':True,'next_seq':seq,
-        'captured_delta':rows[previous_rows-offset:],
+        'collection':collection,'incremental':True,'next_seq':next_seq,
+        'captured_delta':captured_rows,
         'candidates_delta':candidates[previous_candidates:],
         'captured_total':captured_total,'candidate_total':total_candidates,
         'exact_count':exact_count,'potential_count':potential_count,
